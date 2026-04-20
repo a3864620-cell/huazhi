@@ -125,7 +125,6 @@
                   }
                   ms = ms.filter(x => !x || !x._isSettings);
                   
-                  // 🌟 相容舊資料：舊的「含稅」一律視為「外加」
                   if (sets.taxMode === "含稅") sets.taxMode = "外加";
                   if (sets.overageTaxMode === "含稅") sets.overageTaxMode = "外加";
                   if (!sets.overageTaxMode) sets.overageTaxMode = sets.taxMode;
@@ -134,7 +133,6 @@
               });
 
               const parsedRecords = (Array.isArray(rs)?rs:[]).map(r => {
-                  // 🌟 舊紀錄相容處理
                   let tMode = r.taxMode; if(tMode === "含稅") tMode = "外加";
                   let oMode = r.overageTaxMode || tMode; if(oMode === "含稅") oMode = "外加";
                   return {
@@ -180,7 +178,9 @@
               
               const patch = { 
                 clientId:client.id, clientName:client.name, mode:client.mode||"single", model:client.model||"", 
-                taxMode: client.taxMode||"未稅", overageTaxMode: client.overageTaxMode||client.taxMode||"未稅", billingCycle: "1", machineType: client.machineType||"color", multiCalcMode: client.multiCalcMode||"pooled",
+                taxMode: client.taxMode||"未稅", overageTaxMode: client.overageTaxMode||client.taxMode||"未稅", 
+                billingCycle: client.billingCycle||"1", 
+                machineType: client.machineType||"color", multiCalcMode: client.multiCalcMode||"pooled",
                 bwQuota:String(client.bwQuota||""), bwPrice:String(client.bwPrice||"0.35"), colQuota:String(client.colQuota||""), colPrice:String(client.colPrice||"3.5"), 
                 baseRent:String(client.baseRent||""), rentNote:client.rentNote||"", bwCur:"", colCur:"", bwDeduct:"", bwDeductNote:"", colDeduct:"", colDeductNote:"",
                 mBwPrice:String(client.mBwPrice||"0.35"), mColPrice:String(client.mColPrice||"3.5")
@@ -299,7 +299,6 @@
                totalOverage = tBwFee + tColFee;
             }
 
-            // 🌟 核心邏輯：只有「外加」才會另外計算出需要加上的稅額
             const rentTaxAmount = f.taxMode === "外加" ? Math.round(totalRent * 0.05) : 0;
             const overageTaxAmount = f.overageTaxMode === "外加" ? Math.round(totalOverage * 0.05) : 0;
             const taxAmount = rentTaxAmount + overageTaxAmount;
@@ -357,7 +356,6 @@
 
           const filtered=records.filter(r=>(!fYear||r.billingYear===String(fYear))&&(!fMonth||r.billingMonth===String(fMonth))&&(!fClient||r.clientName?.includes(fClient)));
 
-          // =================UI Components=================
           const TogglePill = ({label, options, value, onChange}) => (
              <div style={{display:"flex", border:"2px solid "+C.navy, borderRadius:4, overflow:"hidden", width:"100%"}}>
                 {options.map(opt => (
@@ -446,22 +444,15 @@
                     </div>
 
                     <div style={{background:"#FFF",borderRadius:6,padding:20,marginBottom:16,borderLeft:"4px solid "+C.light}}>
-                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:12}}>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
                         <div><label style={lbl}>年度（民國）</label><input style={inp()} value={f.billingYear} onChange={e=>upd({billingYear:e.target.value})}/></div>
                         <div><label style={lbl}>月份</label><select style={inp()} value={f.billingMonth} onChange={e=>upd({billingMonth:e.target.value})}>{MONTHS.map((m,i)=><option key={i} value={String(i+1)}>{m}</option>)}</select></div>
-                        <div>
-                          <label style={{...lbl, color:C.danger, fontWeight:"bold"}}>本次結帳週期(月數)</label>
-                          <select style={inp({border:"2px solid "+C.danger})} value={f.billingCycle} onChange={e=>upd({billingCycle:e.target.value})}>
-                             {[1,2,3,4,5,6,7,8,9,10,11,12].map(n=><option key={n} value={String(n)}>{n} 個月</option>)}
-                          </select>
-                        </div>
                       </div>
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
                         <div><label style={lbl}>計費起日</label><input style={inp()} type="date" value={f.periodStart||""} onChange={e=>upd({periodStart:e.target.value})}/></div>
                         <div><label style={lbl}>計費迄日</label><input style={inp()} type="date" value={f.periodEnd||""} onChange={e=>upd({periodEnd:e.target.value})}/></div>
                       </div>
                       
-                      {/* 🌟 修改點：將稅金設定集中並細分三種狀態 */}
                       <div style={{borderTop:"1px solid "+C.light, paddingTop:16, marginTop:8}}>
                         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
                            <div>
@@ -626,7 +617,6 @@
                       const totalOverageFee = sumBwFee + sumColFee;
                       const subtotal = sumRent + totalOverageFee;
                       
-                      // 🌟 核心：外加才會計算稅額，內含/未稅為 0
                       const rentTaxAmount = f.taxMode === "外加" ? Math.round(sumRent * 0.05) : 0;
                       const overageTaxAmount = f.overageTaxMode === "外加" ? Math.round(totalOverageFee * 0.05) : 0;
                       const tax = rentTaxAmount + overageTaxAmount;
@@ -702,6 +692,7 @@
                   _isSettings: true,
                   taxMode: ec.taxMode || "未稅",
                   overageTaxMode: ec.overageTaxMode || "未稅",
+                  billingCycle: ec.billingCycle || "1",
                   machineType: ec.machineType || "color",
                   multiCalcMode: ec.multiCalcMode || "pooled"
               }];
@@ -738,6 +729,13 @@
                            <label style={{...lbl, fontWeight:"bold", color:C.danger}}>超印費用計稅方式</label>
                            <TogglePill options={[{label:"未稅",val:"未稅"},{label:"外加(+5%)",val:"外加"},{label:"內含",val:"內含"}]} value={ec.overageTaxMode||ec.taxMode||"未稅"} onChange={v=>updEc({overageTaxMode:v})} />
                        </div>
+                    </div>
+                    
+                    <div style={{marginBottom:16}}>
+                       <label style={{...lbl, fontWeight:"bold", color:C.danger}}>預設結帳週期 (月數)</label>
+                       <select style={inp({border:"2px solid "+C.danger})} value={ec.billingCycle||"1"} onChange={e=>updEc({billingCycle:e.target.value})}>
+                          {[1,2,3,4,5,6,7,8,9,10,11,12].map(n=><option key={n} value={String(n)}>{n} 個月</option>)}
+                       </select>
                     </div>
 
                     <div style={{display:"flex",marginBottom:16,border:"2px solid "+C.navy,borderRadius:4,overflow:"hidden"}}>
@@ -830,15 +828,15 @@
                     <button onClick={()=>setPage("home")} style={{background:"none",border:"none",color:"#FFF",cursor:"pointer",fontSize:18}}>←</button>
                     <div><div style={{fontSize:11,letterSpacing:4,color:C.accent}}>CLIENTS</div><div style={{color:"#FFF",fontSize:18,fontWeight:"bold"}}>客戶資料管理</div></div>
                   </div>
-                  <button style={btnS("accent",{fontSize:13,padding:"8px 16px"})} onClick={()=>setEditClient({_isNew:true,mode:"single",taxMode:"未稅",overageTaxMode:"未稅",machineType:"color",multiCalcMode:"pooled",machines:[emptyMachine()]})}>＋ 新增</button>
+                  <button style={btnS("accent",{fontSize:13,padding:"8px 16px"})} onClick={()=>setEditClient({_isNew:true,mode:"single",taxMode:"未稅",overageTaxMode:"未稅",billingCycle:"1",machineType:"color",multiCalcMode:"pooled",machines:[emptyMachine()]})}>＋ 新增</button>
                 </div>
                 <div style={{padding:"16px",maxWidth:720,margin:"0 auto"}}>
                   {clients.length===0&&<div style={{textAlign:"center",color:C.muted,padding:60,fontWeight:"bold"}}>尚無客戶資料</div>}
                   {clients.map(c=>(
                     <div key={c.id} style={{background:"#FFF",borderRadius:6,padding:16,marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                       <div>
-                        <div style={{fontWeight:"bold",fontSize:16}}>{c.name}</div>
-                        <div style={{fontSize:12,color:C.muted,marginTop:3}}>{c.mode==="single"?"單台":"多台"} ｜ 租:{c.taxMode||"未稅"} / 超印:{c.overageTaxMode||c.taxMode||"未稅"} ｜ {c.machineType==="bw"?"黑白機":"彩色機"}</div>
+                        <div style={{fontWeight:"bold",fontSize:16}}>{c.name} <span style={{fontSize:11, color:C.danger, fontWeight:"bold", marginLeft:6}}>[{c.billingCycle||1}個月結]</span></div>
+                        <div style={{fontSize:12,color:C.muted,marginTop:3}}>{c.mode==="single"?"單台":"多台"} ｜ 租金:{c.taxMode||"未稅"} / 超印:{c.overageTaxMode||c.taxMode||"未稅"} ｜ {c.machineType==="bw"?"黑白機":"彩色機"}</div>
                       </div>
                       <div style={{display:"flex",gap:8}}>
                         <button onClick={()=>setEditClient({...c})} style={{...btnS("light"),padding:"6px 14px",fontSize:12}}>編輯</button>
