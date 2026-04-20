@@ -1,0 +1,1063 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>華芝商業機器 - 印量管理系統</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body style="margin:0; padding:0; background-color:#F5F3EE; font-family:'新細明體', 'PMingLiU', serif;">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useCallback } = React;
+
+        // ⚙️ Apps Script 網址
+        const API_URL = "https://script.google.com/macros/s/AKfycbxqBvxJAmyw3oef6XKi8MFNVe7Xl9qXW1Epk_RgpHxbEdqiO0MGE1IJrDK3R0DRcJXw/exec";
+
+        const MONTHS = ["1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月"];
+        const now = new Date();
+        const CY = now.getFullYear() - 1911;
+
+        const C = { bg:"#F5F3EE", navy:"#1A2744", accent:"#C8973A", light:"#E8E3D9", text:"#2C2C2C", muted:"#7A7A7A", danger:"#C0392B", success:"#1E6B45", blue:"#2A4A9A", blueBg:"#EEF3FF", blueBorder:"#B0C4F0", orange:"#9A6000", orangeBg:"#FFF7ED", orangeBorder:"#F0C070" };
+        const btnS = (v="primary",x={}) => ({ padding:"10px 20px", borderRadius:4, border:"none", cursor:"pointer", fontFamily:"'新細明體', 'PMingLiU', serif", fontSize:14, fontWeight:"bold", letterSpacing:1, background:v==="primary"?C.navy:v==="accent"?C.accent:v==="red"?C.danger:C.light, color:v==="light"?C.text:"#FFF", ...x });
+        const inp = (x={}) => ({ padding:"8px 12px", borderRadius:3, border:"1px solid "+C.light, fontFamily:"'新細明體', 'PMingLiU', serif", fontSize:14, width:"100%", boxSizing:"border-box", background:"#FAFAF8", ...x });
+        const lbl = { fontSize:11, color:C.muted, letterSpacing:.5, marginBottom:4, display:"block" };
+        
+        const PRINT_CSS = `
+          @media print {
+            body * { visibility: hidden !important; }
+            #print-area, #print-area * { visibility: visible !important; }
+            #print-area {
+              position: absolute !important; left: 0 !important; top: 0 !important;
+              width: 100% !important; max-width: 100% !important;
+              padding: 10mm !important; margin: 0 !important;
+              box-sizing: border-box !important; box-shadow: none !important;
+              font-family: '新細明體', 'PMingLiU', serif !important;
+              -webkit-print-color-adjust: exact !important;
+              print-color-adjust: exact !important;
+            }
+            #print-area * { font-weight: bold !important; }
+            @page { margin: 10mm; }
+          }
+        `;
+        
+        function injectPrint(){ if(!document.getElementById("dp")){ const s=document.createElement("style");s.id="dp";s.textContent=PRINT_CSS;document.head.appendChild(s); } }
+
+        function safeParse(val, fallback) {
+            if (typeof val === 'string') {
+                try { return JSON.parse(val); } catch(e) { return fallback; }
+            }
+            return val || fallback;
+        }
+
+        function calcFee(cur,prev,quota,price,deduct=0, cycle=1){
+          const safeCur = Number(cur) || 0;
+          const safePrev = Number(prev) || 0;
+          const safeQuota = Number(quota) || 0;
+          const safePrice = Number(price) || 0;
+          const safeDeduct = Number(deduct) || 0;
+          const safeCycle = Number(cycle) || 1;
+          
+          const raw = Math.max(0, safeCur - safePrev);
+          const actual = Math.max(0, raw - safeDeduct);
+          const totalQuota = safeQuota * safeCycle;
+          const over = Math.max(0, actual - totalQuota);
+          
+          return {raw, actual, over, fee: Math.round(over * safePrice)}; 
+        }
+        
+        const emptyMachine = () => ({ id: Date.now()+Math.random(), type: "color", model: "", baseRent: "", rentNote: "", bwCur: "", bwPrev: "", bwQuota: "", bwPrice:"0.35", bwDeduct: "", bwDeductNote: "", colCur: "", colPrev: "", colQuota: "", colPrice:"3.5", colDeduct: "", colDeductNote: "" });
+
+        function emptyForm(){
+          return { clientId:"", clientName:"", taxMode:"未稅", overageTaxMode:"未稅", billingYear:String(CY), billingMonth:String(now.getMonth()+1), billingCycle:"1", periodStart:"", periodEnd:"", baseRent:"", rentNote:"", mode:"single", machineType:"color", multiCalcMode:"pooled", model:"", bwPrev:"", bwCur:"", bwQuota:"", bwPrice:"0.35", bwDeduct:"", bwDeductNote:"", colPrev:"", colCur:"", colQuota:"", colPrice:"3.5", colDeduct:"", colDeductNote:"", mBwPrice:"0.35", mColPrice:"3.5", machines:[emptyMachine()] };
+        }
+
+        async function api(action, body={}) {
+          const res = await fetch(API_URL, { method:"POST", body: JSON.stringify({action,...body}) });
+          return res.json();
+        }
+
+        function Loading({ text="載入中..." }) {
+          return (
+            <div style={{position:"fixed",inset:0,background:"rgba(26,39,68,.7)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",zIndex:9999}}>
+              <div style={{width:48,height:48,border:"4px solid rgba(255,255,255,.3)",borderTopColor:C.accent,borderRadius:"50%",animation:"spin 0.8s linear infinite",marginBottom:16}}/>
+              <div style={{color:"#FFF",fontFamily:"'新細明體', 'PMingLiU', serif",letterSpacing:2,fontSize:14}}>{text}</div>
+              <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+            </div>
+          );
+        }
+
+        function App(){
+          const [page, setPage] = useState("home");
+          const [loading, setLoading] = useState(false);
+          const [loadingText, setLoadingText] = useState("載入中...");
+          const [records, setRecords] = useState([]);
+          const [clients, setClients] = useState([]);
+          const [f, setF] = useState(emptyForm());
+          const [printData, setPrintData] = useState(null);
+          const [fYear,setFYear]=useState(""); const [fMonth,setFMonth]=useState(""); const [fClient,setFClient]=useState("");
+          const [editClient, setEditClient] = useState(null);
+          const [apiReady] = useState(API_URL !== "https://script.google.com/macros/s/YOUR_SCRIPT_ID/exec");
+          
+          const [showDropdown, setShowDropdown] = useState(false);
+          const [showHistDropdown, setShowHistDropdown] = useState(false);
+
+          const upd = p => setF(prev=>({...prev,...p}));
+          const updMachine = (id,field,val) => upd({machines:f.machines.map(m=>m.id===id?{...m,[field]:val}:m)});
+
+          const load = useCallback(async (showLoad=true) => {
+            if(!apiReady) return;
+            if(showLoad){ setLoadingText("載入資料中..."); setLoading(true); }
+            try {
+              const [cs, rs] = await Promise.all([api("getClients"), api("getRecords",{filters:{}})]);
+              
+              const parsedClients = (Array.isArray(cs)?cs:[]).map(c => {
+                  let msRaw = safeParse(c.machines, []);
+                  let ms = Array.isArray(msRaw) ? [...msRaw] : [];
+                  let sets = { taxMode: "未稅", overageTaxMode: "未稅", billingCycle: "1", machineType: "color", multiCalcMode: "pooled" };
+                  
+                  const backpacks = ms.filter(x => x && x._isSettings);
+                  if (backpacks.length > 0) {
+                      sets = { ...sets, ...backpacks[backpacks.length - 1] };
+                  }
+                  ms = ms.filter(x => !x || !x._isSettings);
+                  
+                  // 🌟 相容舊資料：舊的「含稅」一律視為「外加」
+                  if (sets.taxMode === "含稅") sets.taxMode = "外加";
+                  if (sets.overageTaxMode === "含稅") sets.overageTaxMode = "外加";
+                  if (!sets.overageTaxMode) sets.overageTaxMode = sets.taxMode;
+
+                  return { ...c, ...sets, machines: ms };
+              });
+
+              const parsedRecords = (Array.isArray(rs)?rs:[]).map(r => {
+                  // 🌟 舊紀錄相容處理
+                  let tMode = r.taxMode; if(tMode === "含稅") tMode = "外加";
+                  let oMode = r.overageTaxMode || tMode; if(oMode === "含稅") oMode = "外加";
+                  return {
+                      ...r,
+                      taxMode: tMode,
+                      overageTaxMode: oMode,
+                      machines: safeParse(r.machines, []),
+                      bw: safeParse(r.bw, {}),
+                      col: safeParse(r.col, {})
+                  };
+              });
+              
+              setClients(parsedClients);
+              setRecords(parsedRecords);
+            } catch(e){ alert("連線失敗，請確認 API 網址是否正確"); }
+            setLoading(false);
+          }, [apiReady]);
+
+          useEffect(()=>{ load(); },[load]);
+
+          async function selectClient(name){
+            upd({clientName:name});
+            const client=clients.find(c=>c.name===name);
+            
+            if(!client){ 
+                upd({
+                    clientId:"", 
+                    clientName:name, 
+                    billingCycle: "1",
+                    bwCur: "", bwPrev: "", colCur: "", colPrev: ""
+                }); 
+                return; 
+            }
+
+            setLoadingText("讀取上期資料..."); setLoading(true);
+            try {
+              const prevRecs = await api("getRecords",{filters:{clientId:client.id}});
+              const prev = Array.isArray(prevRecs)&&prevRecs.length>0 ? prevRecs[0] : null;
+              
+              let pMachines = prev ? safeParse(prev.machines, []) : [];
+              let pbw = prev ? safeParse(prev.bw, {}) : {};
+              let pcol = prev ? safeParse(prev.col, {}) : {};
+              
+              const patch = { 
+                clientId:client.id, clientName:client.name, mode:client.mode||"single", model:client.model||"", 
+                taxMode: client.taxMode||"未稅", overageTaxMode: client.overageTaxMode||client.taxMode||"未稅", billingCycle: "1", machineType: client.machineType||"color", multiCalcMode: client.multiCalcMode||"pooled",
+                bwQuota:String(client.bwQuota||""), bwPrice:String(client.bwPrice||"0.35"), colQuota:String(client.colQuota||""), colPrice:String(client.colPrice||"3.5"), 
+                baseRent:String(client.baseRent||""), rentNote:client.rentNote||"", bwCur:"", colCur:"", bwDeduct:"", bwDeductNote:"", colDeduct:"", colDeductNote:"",
+                mBwPrice:String(client.mBwPrice||"0.35"), mColPrice:String(client.mColPrice||"3.5")
+              };
+              
+              if(client.mode==="multi") {
+                 patch.machines = (client.machines && client.machines.length > 0 ? client.machines : [emptyMachine()]).map((cm, i) => {
+                    const pm = pMachines[i];
+                    return {
+                       ...emptyMachine(), ...cm,
+                       type: cm.type || "color",
+                       bwQuota: cm.bwQuota !== undefined ? cm.bwQuota : "",
+                       bwPrice: cm.bwPrice !== undefined ? cm.bwPrice : (client.mBwPrice || "0.35"),
+                       colQuota: cm.colQuota !== undefined ? cm.colQuota : "",
+                       colPrice: cm.colPrice !== undefined ? cm.colPrice : (client.mColPrice || "3.5"),
+                       baseRent: cm.baseRent !== undefined ? cm.baseRent : (i===0 ? (client.baseRent||"") : ""),
+                       bwPrev: pm ? String(pm.bwCur || pm.bwActual || "") : "",
+                       colPrev: pm ? String(pm.colCur || pm.colActual || "") : ""
+                    };
+                 });
+              } else {
+                 if(prev) { patch.bwPrev=String(pbw?.current||""); patch.colPrev=String(pcol?.current||""); }
+                 else { patch.bwPrev=""; patch.colPrev=""; }
+              }
+              upd(patch);
+            } catch(e){
+                console.error(e);
+                upd({ bwPrev: "", colPrev: "", billingCycle: "1" });
+            }
+            setLoading(false);
+          }
+
+          async function upsertClientProfile(form){
+            const existing=clients.find(c=>c.id===form.clientId||c.name===form.clientName.trim());
+            const baseMs = form.mode==="multi" ? form.machines.map(m=>({ id:m.id, type:m.type||"color", model:m.model, baseRent:m.baseRent, rentNote:m.rentNote, bwQuota:m.bwQuota, bwPrice:m.bwPrice, colQuota:m.colQuota, colPrice:m.colPrice })) : [];
+            
+            const payloadMs = [...baseMs.filter(m => !m._isSettings), {
+                _isSettings: true,
+                taxMode: form.taxMode || "未稅",
+                overageTaxMode: form.overageTaxMode || "未稅",
+                billingCycle: form.billingCycle || "1",
+                machineType: form.machineType || "color",
+                multiCalcMode: form.multiCalcMode || "pooled"
+            }];
+
+            const profile={
+               id:existing?.id||String(Date.now()), name:form.clientName.trim(), mode:form.mode,
+               model:form.model, bwQuota:form.bwQuota, bwPrice:form.bwPrice, colQuota:form.colQuota, colPrice:form.colPrice, baseRent:form.baseRent, rentNote:form.rentNote,
+               mBwPrice:form.mBwPrice, mColPrice:form.mColPrice,
+               machines: payloadMs
+            };
+            await api("saveClient",{client:profile});
+            return profile.id;
+          }
+
+          function buildRecord(clientId){
+            const isSingle = f.mode==="single";
+            const cycle = Number(f.billingCycle) || 1;
+            let totalRent = 0, totalOverage = 0;
+            
+            const bw = calcFee(f.bwCur,f.bwPrev,f.bwQuota,f.bwPrice,f.bwDeduct, cycle); 
+            const col = f.machineType === "bw" ? {raw:0, actual:0, over:0, fee:0, current:"", prev:"", quota:"", price:"", deduct:0} : calcFee(f.colCur,f.colPrev,f.colQuota,f.colPrice,f.colDeduct, cycle);
+            
+            let tBwRaw=0, tBwQuota=0, tBwDeduct=0, tBwOver=0, tBwFee=0;
+            let tColRaw=0, tColQuota=0, tColDeduct=0, tColOver=0, tColFee=0;
+
+            const ms = f.machines.map(m => {
+               const mBwRaw = Math.max(0,(Number(m.bwCur)||0)-(Number(m.bwPrev)||0));
+               const mColRaw = m.type === "bw" ? 0 : Math.max(0,(Number(m.colCur)||0)-(Number(m.colPrev)||0));
+               
+               const mBwActual = Math.max(0, mBwRaw - (Number(m.bwDeduct)||0));
+               const mColActual = Math.max(0, mColRaw - (Number(m.colDeduct)||0));
+               
+               const mBwOverCalc = Math.max(0, mBwActual - ((Number(m.bwQuota)||0)*cycle));
+               const mColOverCalc = Math.max(0, mColActual - ((Number(m.colQuota)||0)*cycle));
+               
+               const currentBwPrice = f.multiCalcMode === "separate" ? (Number(m.bwPrice)||0) : (Number(f.mBwPrice)||0);
+               const currentColPrice = f.multiCalcMode === "separate" ? (Number(m.colPrice)||0) : (Number(f.mColPrice)||0);
+
+               const mBwFeeCalc = Math.round(mBwOverCalc * currentBwPrice);
+               const mColFeeCalc = Math.round(mColOverCalc * currentColPrice);
+
+               tBwRaw += mBwRaw; tBwQuota += (Number(m.bwQuota)||0)*cycle; tBwDeduct += Number(m.bwDeduct)||0;
+               tColRaw += mColRaw; tColQuota += (Number(m.colQuota)||0)*cycle; tColDeduct += Number(m.colDeduct)||0;
+               
+               return {
+                  ...m,
+                  bw: { current:m.bwCur, prev:m.bwPrev, raw:mBwRaw, actual:mBwActual, quota: (Number(m.bwQuota)||0)*cycle, deduct:m.bwDeduct, note:m.bwDeductNote, over:mBwOverCalc, price:currentBwPrice, fee:mBwFeeCalc },
+                  col: { current:m.colCur, prev:m.colPrev, raw:mColRaw, actual:mColActual, quota: (Number(m.colQuota)||0)*cycle, deduct:m.colDeduct, note:m.colDeductNote, over:mColOverCalc, price:currentColPrice, fee:mColFeeCalc },
+                  bwActual: mBwActual, colActual: mColActual 
+               };
+            });
+
+            if (isSingle) {
+               totalRent = (Number(f.baseRent) || 0) * cycle;
+               totalOverage = bw.fee + col.fee;
+            } else {
+               ms.forEach(m => { 
+                  totalRent += (Number(m.baseRent)||0) * cycle; 
+                  if (f.multiCalcMode === "separate") {
+                     tBwOver += m.bw.over; tColOver += m.col.over;
+                     tBwFee += m.bw.fee; tColFee += m.col.fee;
+                  }
+               });
+
+               if (f.multiCalcMode === "pooled") {
+                  const poolBwActual = Math.max(0, tBwRaw - tBwDeduct);
+                  tBwOver = Math.max(0, poolBwActual - tBwQuota);
+                  tBwFee = Math.round(tBwOver * (Number(f.mBwPrice)||0));
+
+                  const poolColActual = Math.max(0, tColRaw - tColDeduct);
+                  tColOver = Math.max(0, poolColActual - tColQuota);
+                  tColFee = Math.round(tColOver * (Number(f.mColPrice)||0));
+               }
+               
+               totalOverage = tBwFee + tColFee;
+            }
+
+            // 🌟 核心邏輯：只有「外加」才會另外計算出需要加上的稅額
+            const rentTaxAmount = f.taxMode === "外加" ? Math.round(totalRent * 0.05) : 0;
+            const overageTaxAmount = f.overageTaxMode === "外加" ? Math.round(totalOverage * 0.05) : 0;
+            const taxAmount = rentTaxAmount + overageTaxAmount;
+            
+            const subtotal = totalRent + totalOverage;
+            const finalTotal = subtotal + taxAmount;
+
+            return {
+               id:Date.now(), clientId, mode:f.mode, clientName:f.clientName, billingYear:f.billingYear, billingMonth:f.billingMonth, billingCycle:cycle, periodStart:f.periodStart, periodEnd:f.periodEnd,
+               taxMode:f.taxMode, overageTaxMode:f.overageTaxMode, machineType:f.machineType, multiCalcMode:f.multiCalcMode,
+               baseRent:totalRent, rentNote:isSingle?f.rentNote:"", model:f.model,
+               bw:{current:f.bwCur,prev:f.bwPrev,quota:(Number(f.bwQuota)||0)*cycle,price:f.bwPrice,deduct:f.bwDeduct,note:f.bwDeductNote,...bw},
+               col:{current:f.colCur,prev:f.colPrev,quota:(Number(f.colQuota)||0)*cycle,price:f.colPrice,deduct:f.colDeduct,note:f.colDeductNote,...col},
+               machines:ms, 
+               totalBwRaw: isSingle ? bw.raw : tBwRaw, 
+               totalColRaw: isSingle ? col.raw : tColRaw,
+               bwQuota: isSingle ? (Number(f.bwQuota)||0)*cycle : tBwQuota,
+               colQuota: isSingle ? (Number(f.colQuota)||0)*cycle : tColQuota,
+               bwDeduct: isSingle ? f.bwDeduct : tBwDeduct,
+               colDeduct: isSingle ? f.colDeduct : tColDeduct,
+               bwActual: isSingle ? bw.actual : Math.max(0, tBwRaw - tBwDeduct),
+               colActual: isSingle ? col.actual : Math.max(0, tColRaw - tColDeduct),
+               bwOver: isSingle ? bw.over : tBwOver,
+               colOver: isSingle ? col.over : tColOver,
+               bwPrice: isSingle ? f.bwPrice : f.mBwPrice,
+               colPrice: isSingle ? f.colPrice : f.mColPrice,
+               bwFee: isSingle ? bw.fee : tBwFee,
+               colFee: isSingle ? col.fee : tColFee,
+               subtotal: subtotal, taxAmount: taxAmount,
+               total: finalTotal, createdAt:new Date().toISOString()
+            };
+          }
+
+          async function handleSave(andPrint=false){
+            if(!f.clientName.trim()) return alert("請輸入客戶名稱");
+            setLoadingText("儲存中..."); setLoading(true);
+            try {
+              const cid=await upsertClientProfile(f);
+              const rec=buildRecord(cid);
+              await api("saveRecord",{record:rec});
+              await load(false);
+              if(andPrint){ setPrintData(rec); setPage("preview"); }
+              else{ alert("已儲存！"); setF(emptyForm()); setPage("home"); }
+            } catch(e){ alert("儲存失敗："+e.message); }
+            setLoading(false);
+          }
+
+          async function deleteHistoryRecord(id){
+            if(!confirm("確定要刪除這筆帳單記錄嗎？\n(注意：刪除後無法恢復喔！)")){ return; }
+            setLoadingText("刪除中..."); setLoading(true);
+            try { await api("deleteRecord", {recordId: id}); await load(false); }
+            catch(e){ alert("刪除失敗，請檢查網路"); }
+            setLoading(false);
+          }
+
+          const filtered=records.filter(r=>(!fYear||r.billingYear===String(fYear))&&(!fMonth||r.billingMonth===String(fMonth))&&(!fClient||r.clientName?.includes(fClient)));
+
+          // =================UI Components=================
+          const TogglePill = ({label, options, value, onChange}) => (
+             <div style={{display:"flex", border:"2px solid "+C.navy, borderRadius:4, overflow:"hidden", width:"100%"}}>
+                {options.map(opt => (
+                   <button key={opt.val} onClick={()=>onChange(opt.val)} style={{flex:1, padding:"6px", border:"none", cursor:"pointer", fontFamily:"'新細明體', 'PMingLiU', serif", fontSize:12, fontWeight:"bold", background:value===opt.val?C.navy:"#FFF", color:value===opt.val?"#FFF":C.navy}}>
+                      {opt.label}
+                   </button>
+                ))}
+             </div>
+          );
+
+          if(!apiReady) return <div style={{padding:40,textAlign:"center"}}>尚未設定 API_URL</div>;
+
+          if(page==="home") return (
+            <div style={{fontFamily:"'新細明體', 'PMingLiU', serif",minHeight:"100vh",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24}}>
+              {loading&&<Loading text={loadingText}/>}
+              <div style={{textAlign:"center",marginBottom:48}}>
+                <div style={{fontSize:11,letterSpacing:6,color:C.accent,marginBottom:8}}>PRINT METER SYSTEM</div>
+                <h1 style={{fontSize:28,color:C.navy,margin:"0 0 8px",fontWeight:"bold"}}>影印機印量管理系統</h1>
+                <div style={{width:60,height:2,background:C.accent,margin:"0 auto"}}/>
+                <div style={{marginTop:12,fontSize:11,color:C.success,fontWeight:"bold"}}>● 連線至 Google Sheets</div>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:14,width:"100%",maxWidth:320}}>
+                <button style={btnS("primary",{width:"100%"})} onClick={()=>{setF(emptyForm());setPage("input")}}>＋ 新增本月印量記錄</button>
+                <button style={btnS("light",{width:"100%"})} onClick={()=>{load();setPage("history")}}>📋 查詢歷史記錄</button>
+                <button style={btnS("light",{width:"100%"})} onClick={()=>setPage("clients")}>👥 管理客戶資料</button>
+              </div>
+              <div style={{marginTop:48,fontSize:12,color:C.muted}}>已儲存 {records.length} 筆記錄 · {clients.length} 位客戶</div>
+            </div>
+          );
+
+          if(page==="input"){
+            const isNew = !clients.find(c=>c.name===f.clientName.trim());
+            
+            return (
+              <div style={{fontFamily:"'新細明體', 'PMingLiU', serif",minHeight:"100vh",background:C.bg,paddingBottom:40}}>
+                {loading&&<Loading text={loadingText}/>}
+                <div style={{background:C.navy,padding:"16px 20px",display:"flex",alignItems:"center",gap:16}}>
+                  <button onClick={()=>setPage("home")} style={{background:"none",border:"none",color:"#FFF",cursor:"pointer",fontSize:18}}>←</button>
+                  <div><div style={{fontSize:11,letterSpacing:4,color:C.accent}}>NEW RECORD</div><div style={{color:"#FFF",fontSize:18,fontWeight:"bold"}}>新增印量記錄</div></div>
+                </div>
+                <div style={{padding:"20px 16px",maxWidth:640,margin:"0 auto"}}>
+                  
+                  <div style={{background:"#FFF",borderRadius:6,padding:20,marginBottom:16,borderLeft:"4px solid "+C.accent}}>
+                    <div style={{fontSize:11,letterSpacing:3,color:C.accent,marginBottom:16,fontWeight:"bold"}}>選擇客戶</div>
+                    <label style={lbl}>輸入關鍵字搜尋，或直接輸入新客戶名稱</label>
+                    <div style={{ position: "relative" }}>
+                      <input 
+                        style={inp({fontSize:16, padding:"12px 14px", border: "2px solid " + (isNew ? C.accent : C.success), fontWeight: "bold"})} 
+                        value={f.clientName} 
+                        onChange={e => {
+                          upd({clientName: e.target.value});
+                          setShowDropdown(true);
+                        }}
+                        onFocus={() => setShowDropdown(true)}
+                        onBlur={() => setTimeout(() => setShowDropdown(false), 200)}
+                        placeholder="請輸入客戶名稱..."
+                      />
+                      {showDropdown && (
+                        <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "#FFF", border: "1px solid "+C.light, borderTop: "none", borderRadius: "0 0 6px 6px", boxShadow: "0 8px 24px rgba(0,0,0,0.15)", zIndex: 100, maxHeight: "250px", overflowY: "auto" }}>
+                          {clients.filter(c => c.name.toLowerCase().includes(f.clientName.toLowerCase())).length > 0 ? (
+                            clients.filter(c => c.name.toLowerCase().includes(f.clientName.toLowerCase())).map(c => (
+                              <div
+                                key={c.id}
+                                onClick={() => { selectClient(c.name); setShowDropdown(false); }}
+                                onMouseDown={(e) => e.preventDefault()} 
+                                style={{ padding: "14px 16px", borderBottom: "1px solid #F5F5F5", cursor: "pointer", fontSize: 16, color: C.navy, fontWeight: "bold" }}
+                              >
+                                {c.name} <span style={{fontSize:12, color:C.muted, fontWeight:"normal", marginLeft:8}}>{c.model ? `(${c.model})` : ""}</span>
+                              </div>
+                            ))
+                          ) : (
+                            <div style={{ padding: "14px 16px", color: C.accent, fontSize: 14, background: "#FFFBE6", fontWeight:"bold" }}>
+                              找不到此客戶，將作為「新客戶」建立 ✨
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    {f.clientName && isNew && <div style={{marginTop: 12, background:"#FFFBE6",border:"1px solid #F5C542",borderRadius:4,padding:"8px 12px",fontSize:12,color:"#7A5800",fontWeight:"bold"}}>✨ 新客戶 — 請填寫下方完整資料，儲存後自動記住</div>}
+                    {f.clientName && !isNew && <div style={{marginTop: 12, background:"#E6F4EA",border:"1px solid #81C784",borderRadius:4,padding:"8px 12px",fontSize:12,color:C.success,fontWeight:"bold"}}>✅ 已自動帶入設定與上期錶號，只需填寫本期錶號</div>}
+                  </div>
+
+                  {f.clientName&&(<>
+                    <div style={{marginBottom:16}}>
+                        <TogglePill options={[{label:"單台印表機",val:"single"},{label:"多台 (可設分店/各樓層)",val:"multi"}]} value={f.mode} onChange={v=>upd({mode:v})} />
+                    </div>
+
+                    <div style={{background:"#FFF",borderRadius:6,padding:20,marginBottom:16,borderLeft:"4px solid "+C.light}}>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:12}}>
+                        <div><label style={lbl}>年度（民國）</label><input style={inp()} value={f.billingYear} onChange={e=>upd({billingYear:e.target.value})}/></div>
+                        <div><label style={lbl}>月份</label><select style={inp()} value={f.billingMonth} onChange={e=>upd({billingMonth:e.target.value})}>{MONTHS.map((m,i)=><option key={i} value={String(i+1)}>{m}</option>)}</select></div>
+                        <div>
+                          <label style={{...lbl, color:C.danger, fontWeight:"bold"}}>本次結帳週期(月數)</label>
+                          <select style={inp({border:"2px solid "+C.danger})} value={f.billingCycle} onChange={e=>upd({billingCycle:e.target.value})}>
+                             {[1,2,3,4,5,6,7,8,9,10,11,12].map(n=><option key={n} value={String(n)}>{n} 個月</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+                        <div><label style={lbl}>計費起日</label><input style={inp()} type="date" value={f.periodStart||""} onChange={e=>upd({periodStart:e.target.value})}/></div>
+                        <div><label style={lbl}>計費迄日</label><input style={inp()} type="date" value={f.periodEnd||""} onChange={e=>upd({periodEnd:e.target.value})}/></div>
+                      </div>
+                      
+                      {/* 🌟 修改點：將稅金設定集中並細分三種狀態 */}
+                      <div style={{borderTop:"1px solid "+C.light, paddingTop:16, marginTop:8}}>
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
+                           <div>
+                              <label style={{...lbl, fontWeight:"bold", color:C.navy}}>基本租金計稅</label>
+                              <TogglePill options={[{label:"未稅",val:"未稅"},{label:"外加(+5%)",val:"外加"},{label:"內含",val:"內含"}]} value={f.taxMode} onChange={v=>upd({taxMode:v})} />
+                           </div>
+                           <div>
+                              <label style={{...lbl, fontWeight:"bold", color:C.danger}}>超印費用計稅</label>
+                              <TogglePill options={[{label:"未稅",val:"未稅"},{label:"外加(+5%)",val:"外加"},{label:"內含",val:"內含"}]} value={f.overageTaxMode} onChange={v=>upd({overageTaxMode:v})} />
+                           </div>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {f.mode==="single"&&(
+                      <div style={{background:"#FFF",borderRadius:6,padding:20,marginBottom:16,borderLeft:"4px solid "+C.navy}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+                           <div style={{fontSize:11,letterSpacing:3,color:C.navy,fontWeight:"bold"}}>單台設定</div>
+                        </div>
+                        
+                        <div style={{marginBottom:16}}>
+                           <label style={{...lbl, fontWeight:"bold", color:C.navy}}>機型種類選擇（隱藏多餘欄位）</label>
+                           <TogglePill options={[{label:"黑白機",val:"bw"},{label:"彩色機 (含黑白)",val:"color"}]} value={f.machineType} onChange={v=>upd({machineType:v})} />
+                        </div>
+
+                        <div style={{background:C.blueBg,border:"1px solid "+C.blueBorder,borderRadius:4,padding:14,marginBottom:14}}>
+                          <div style={{fontSize:11,letterSpacing:3,color:C.blue,marginBottom:10,fontWeight:"bold"}}>💰 基本租金（選填）</div>
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                            <div><label style={lbl}>金額（元/單月）</label><input style={inp()} value={f.baseRent||""} onChange={e=>upd({baseRent:e.target.value})} placeholder="0"/></div>
+                            <div><label style={lbl}>備註</label><input style={inp()} value={f.rentNote||""} onChange={e=>upd({rentNote:e.target.value})} placeholder="月租金"/></div>
+                          </div>
+                          {Number(f.billingCycle) > 1 && <div style={{fontSize:11, color:C.blue, marginTop:6}}>* 系統將自動計算 {f.billingCycle} 個月的總金額：${(Number(f.baseRent)||0) * Number(f.billingCycle)}</div>}
+                        </div>
+
+                        <div style={{marginBottom:14}}><label style={lbl}>機型 / 部門</label><input style={inp()} value={f.model||""} onChange={e=>upd({model:e.target.value})} placeholder="例：MPC3503"/></div>
+                        
+                        {[ 
+                          {title:"⚫ 黑白列印", ck:"bwCur", pk:"bwPrev", qk:"bwQuota", prk:"bwPrice", ddk:"bwDeduct", nk:"bwDeductNote"}, 
+                          ...(f.machineType==="bw" ? [] : [{title:"🔴 彩色列印", ck:"colCur", pk:"colPrev", qk:"colQuota", prk:"colPrice", ddk:"colDeduct", nk:"colDeductNote"}]) 
+                        ].map(({title,ck,pk,qk,prk,ddk,nk})=>{
+                          const result = calcFee(f[ck],f[pk],f[qk],f[prk],f[ddk], f.billingCycle);
+                          return (
+                            <div key={title} style={{marginBottom:20,padding:14,background:C.bg,borderRadius:4, border:"1px solid "+C.light}}>
+                              <div style={{fontWeight:"bold",marginBottom:12,color:C.navy,fontSize:15}}>{title}</div>
+                              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10}}>
+                                <div><label style={{...lbl,color:C.navy,fontWeight:"bold"}}>🔵 本期錶號</label><input style={inp({border:"2px solid "+C.navy,background:"#F0F4FF"})} value={f[ck]||""} onChange={e=>upd({[ck]:e.target.value})} placeholder="填抄表數字"/></div>
+                                <div><label style={lbl}>上期錶號</label><input style={inp({background:"#F5F5F5"})} value={f[pk]||""} onChange={e=>upd({[pk]:e.target.value})} placeholder="0"/></div>
+                                <div><label style={lbl}>單月基本額度</label><input style={inp()} value={f[qk]||""} onChange={e=>upd({[qk]:e.target.value})} placeholder="0"/></div>
+                                <div><label style={{...lbl,color:C.danger,fontWeight:"bold"}}>超印單價</label><input style={inp({border:"1px solid "+C.danger})} value={f[prk]||""} onChange={e=>upd({[prk]:e.target.value})}/></div>
+                                <div><label style={lbl}>🔧 扣除張數</label><input style={inp()} value={f[ddk]||""} onChange={e=>upd({[ddk]:e.target.value})} placeholder="0"/></div>
+                                <div style={{gridColumn:"span 3"}}><label style={lbl}>🔧 扣除備註</label><input style={inp()} value={f[nk]||""} onChange={e=>upd({[nk]:e.target.value})} placeholder="換零件等..."/></div>
+                              </div>
+                              {f[ck]&&<div style={{marginTop:10,fontSize:13,fontWeight:"bold",color:result.over>0?C.danger:C.success}}>總印量 {result.raw.toLocaleString()}{(Number(f[ddk])||0)>0?" → 扣除後計費 "+result.actual.toLocaleString():""} ｜ {result.over>0?"超出 "+result.over.toLocaleString()+" 張 → $"+Math.round(result.fee).toLocaleString():"✓ 未超出額度 (本期總額度: "+((Number(f[qk])||0)*Number(f.billingCycle))+")"}</div>}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                    
+                    {f.mode==="multi"&&(
+                      <div style={{background:"#FFF",borderRadius:6,padding:20,marginBottom:16,borderLeft:"4px solid "+C.navy}}>
+                        <div style={{fontSize:11,letterSpacing:3,color:C.navy,marginBottom:16,fontWeight:"bold"}}>多台設定 (分店 / 跨樓層)</div>
+                        
+                        <div style={{marginBottom:16}}>
+                           <label style={{...lbl, fontWeight:"bold", color:C.navy}}>多台超印計算方式</label>
+                           <TogglePill options={[{label:"各機台獨立計算 (各點不同單價)",val:"separate"},{label:"總額度合併計算 (全公司統一單價)",val:"pooled"}]} value={f.multiCalcMode} onChange={v=>upd({multiCalcMode:v})} />
+                        </div>
+
+                        {f.multiCalcMode === "pooled" && (
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:20,background:C.bg,padding:14,borderRadius:4}}>
+                            <div><label style={{...lbl,fontWeight:"bold",color:C.navy}}>統一黑白單價</label><input style={inp({border:"2px solid "+C.navy})} value={f.mBwPrice||""} onChange={e=>upd({mBwPrice:e.target.value})}/></div>
+                            <div><label style={{...lbl,fontWeight:"bold",color:C.navy}}>統一彩色單價</label><input style={inp({border:"2px solid "+C.navy})} value={f.mColPrice||""} onChange={e=>upd({mColPrice:e.target.value})}/></div>
+                          </div>
+                        )}
+
+                        {f.machines.map((m, i)=>(
+                            <div key={m.id} style={{padding:16,background:C.bg,borderRadius:6,marginBottom:16,border:"1px solid "+C.blueBorder}}>
+                              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                                <div style={{fontSize:15,fontWeight:"bold",color:C.navy}}>機台 {i+1} <input style={inp({width:140, marginLeft:10, display:"inline-block"})} value={m.model||""} onChange={e=>updMachine(m.id,"model",e.target.value)} placeholder="機型/地點"/></div>
+                                {f.machines.length>1&&<button onClick={()=>upd({machines:f.machines.filter(x=>x.id!==m.id)})} style={{background:"none",border:"none",cursor:"pointer",color:C.danger,fontSize:18}}>✕</button>}
+                              </div>
+
+                              <div style={{marginBottom:12}}>
+                                 <TogglePill options={[{label:"黑白機",val:"bw"},{label:"彩色機",val:"color"}]} value={m.type||"color"} onChange={v=>updMachine(m.id,"type",v)} />
+                              </div>
+
+                              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+                                <div><label style={lbl}>本機單月基本租金</label><input style={inp()} value={m.baseRent||""} onChange={e=>updMachine(m.id,"baseRent",e.target.value)} placeholder="0"/></div>
+                                <div><label style={lbl}>租金備註</label><input style={inp()} value={m.rentNote||""} onChange={e=>updMachine(m.id,"rentNote",e.target.value)} placeholder="例：2F業務部"/></div>
+                              </div>
+                              
+                              <div style={{marginBottom:14, borderTop:"1px dashed #DDD", paddingTop:10}}>
+                                <div style={{fontSize:13,fontWeight:"bold",color:C.navy,marginBottom:8}}>⚫ 黑白列印</div>
+                                <div style={{display:"grid",gridTemplateColumns: f.multiCalcMode==="separate" ? "1fr 1fr 1fr 1fr 1fr" : "1fr 1fr 1fr 1fr", gap:8}}>
+                                  <div><label style={{...lbl,color:C.navy,fontWeight:"bold"}}>本期🔵</label><input style={inp({border:"2px solid "+C.navy})} value={m.bwCur||""} onChange={e=>updMachine(m.id,"bwCur",e.target.value)}/></div>
+                                  <div><label style={lbl}>上期</label><input style={inp({background:"#F5F5F5"})} value={m.bwPrev||""} onChange={e=>updMachine(m.id,"bwPrev",e.target.value)}/></div>
+                                  <div><label style={lbl}>本機單月額度</label><input style={inp()} value={m.bwQuota||""} onChange={e=>updMachine(m.id,"bwQuota",e.target.value)}/></div>
+                                  {f.multiCalcMode === "separate" && <div><label style={{...lbl,color:C.danger,fontWeight:"bold"}}>本機單價</label><input style={inp({border:"1px solid "+C.danger})} value={m.bwPrice||""} onChange={e=>updMachine(m.id,"bwPrice",e.target.value)}/></div>}
+                                  <div><label style={lbl}>扣除張數</label><input style={inp()} value={m.bwDeduct||""} onChange={e=>updMachine(m.id,"bwDeduct",e.target.value)}/></div>
+                                  <div style={{gridColumn: f.multiCalcMode==="separate"?"span 5":"span 4"}}><label style={lbl}>扣除備註</label><input style={inp()} value={m.bwDeductNote||""} onChange={e=>updMachine(m.id,"bwDeductNote",e.target.value)} placeholder="可填寫扣除原因"/></div>
+                                </div>
+                              </div>
+
+                              {m.type === "bw" ? null : (
+                                <div style={{borderTop:"1px dashed #DDD", paddingTop:10}}>
+                                  <div style={{fontSize:13,fontWeight:"bold",color:C.danger,marginBottom:8}}>🔴 彩色列印</div>
+                                  <div style={{display:"grid",gridTemplateColumns: f.multiCalcMode==="separate" ? "1fr 1fr 1fr 1fr 1fr" : "1fr 1fr 1fr 1fr",gap:8}}>
+                                    <div><label style={{...lbl,color:C.navy,fontWeight:"bold"}}>本期🔵</label><input style={inp({border:"2px solid "+C.navy})} value={m.colCur||""} onChange={e=>updMachine(m.id,"colCur",e.target.value)}/></div>
+                                    <div><label style={lbl}>上期</label><input style={inp({background:"#F5F5F5"})} value={m.colPrev||""} onChange={e=>updMachine(m.id,"colPrev",e.target.value)}/></div>
+                                    <div><label style={lbl}>本機單月額度</label><input style={inp()} value={m.colQuota||""} onChange={e=>updMachine(m.id,"colQuota",e.target.value)}/></div>
+                                    {f.multiCalcMode === "separate" && <div><label style={{...lbl,color:C.danger,fontWeight:"bold"}}>本機單價</label><input style={inp({border:"1px solid "+C.danger})} value={m.colPrice||""} onChange={e=>updMachine(m.id,"colPrice",e.target.value)}/></div>}
+                                    <div><label style={lbl}>扣除張數</label><input style={inp()} value={m.colDeduct||""} onChange={e=>updMachine(m.id,"colDeduct",e.target.value)}/></div>
+                                    <div style={{gridColumn: f.multiCalcMode==="separate"?"span 5":"span 4"}}><label style={lbl}>扣除備註</label><input style={inp()} value={m.colDeductNote||""} onChange={e=>updMachine(m.id,"colDeductNote",e.target.value)} placeholder="可填寫扣除原因"/></div>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                        ))}
+                        <button onClick={()=>upd({machines:[...f.machines, emptyMachine()]})} style={{...btnS("light"),width:"100%",marginBottom:16}}>＋ 新增機台</button>
+                      </div>
+                    )}
+                    
+                    {(()=>{
+                      let sumRent = 0, sumBwRaw = 0, sumBwQuota = 0, sumBwDeduct = 0, sumBwOver = 0, sumBwFee = 0;
+                      let sumColRaw = 0, sumColQuota = 0, sumColDeduct = 0, sumColOver = 0, sumColFee = 0;
+                      const cycle = Number(f.billingCycle) || 1;
+
+                      if (f.mode === "single") {
+                        const sBw = calcFee(f.bwCur, f.bwPrev, f.bwQuota, f.bwPrice, f.bwDeduct, cycle);
+                        const sCol = f.machineType === "bw" ? {raw:0,over:0,fee:0} : calcFee(f.colCur, f.colPrev, f.colQuota, f.colPrice, f.colDeduct, cycle);
+                        sumRent = (Number(f.baseRent)||0) * cycle;
+                        sumBwRaw = sBw.raw; sumBwQuota = (Number(f.bwQuota)||0)*cycle; sumBwDeduct = Number(f.bwDeduct)||0; sumBwOver = sBw.over; sumBwFee = sBw.fee;
+                        sumColRaw = sCol.raw; sumColQuota = (Number(f.colQuota)||0)*cycle; sumColDeduct = Number(f.colDeduct)||0; sumColOver = sCol.over; sumColFee = sCol.fee;
+                      } else {
+                        f.machines.forEach(m => {
+                          sumRent += (Number(m.baseRent)||0) * cycle;
+                          const mBwRaw = Math.max(0,(Number(m.bwCur)||0)-(Number(m.bwPrev)||0));
+                          const mColRaw = m.type === "bw" ? 0 : Math.max(0,(Number(m.colCur)||0)-(Number(m.colPrev)||0));
+                          sumBwRaw += mBwRaw; sumBwQuota += (Number(m.bwQuota)||0)*cycle; sumBwDeduct += Number(m.bwDeduct)||0;
+                          sumColRaw += mColRaw; sumColQuota += (Number(m.colQuota)||0)*cycle; sumColDeduct += Number(m.colDeduct)||0;
+
+                          if (f.multiCalcMode === "separate") {
+                             const mBwOver = Math.max(0, Math.max(0, mBwRaw - (Number(m.bwDeduct)||0)) - ((Number(m.bwQuota)||0)*cycle));
+                             const mColOver = Math.max(0, Math.max(0, mColRaw - (Number(m.colDeduct)||0)) - ((Number(m.colQuota)||0)*cycle));
+                             sumBwOver += mBwOver; sumColOver += mColOver;
+                             sumBwFee += Math.round(mBwOver * (Number(m.bwPrice)||0)); 
+                             sumColFee += Math.round(mColOver * (Number(m.colPrice)||0)); 
+                          }
+                        });
+
+                        if (f.multiCalcMode === "pooled") {
+                          const bAct = Math.max(0, sumBwRaw - sumBwDeduct);
+                          sumBwOver = Math.max(0, bAct - sumBwQuota);
+                          sumBwFee = Math.round(sumBwOver * (Number(f.mBwPrice)||0));
+
+                          const poolColActual = Math.max(0, sumColRaw - sumColDeduct);
+                          sumColOver = Math.max(0, poolColActual - sumColQuota);
+                          sumColFee = Math.round(sumColOver * (Number(f.mColPrice)||0));
+                        }
+                      }
+                      
+                      const totalOverageFee = sumBwFee + sumColFee;
+                      const subtotal = sumRent + totalOverageFee;
+                      
+                      // 🌟 核心：外加才會計算稅額，內含/未稅為 0
+                      const rentTaxAmount = f.taxMode === "外加" ? Math.round(sumRent * 0.05) : 0;
+                      const overageTaxAmount = f.overageTaxMode === "外加" ? Math.round(totalOverageFee * 0.05) : 0;
+                      const tax = rentTaxAmount + overageTaxAmount;
+
+                      const liveTotal = subtotal + tax;
+
+                      return (
+                        <>
+                          <div style={{background:"#FFF", border:"1px solid "+C.blueBorder, borderRadius:6, padding:16, marginBottom:16}}>
+                            <div style={{fontSize:12, fontWeight:"bold", color:C.navy, marginBottom:12, borderBottom:"1px solid "+C.light, paddingBottom:8}}>🧾 本期費用試算明細 ({cycle}個月結算)</div>
+                            
+                            {sumRent > 0 && (
+                              <div style={{display:"flex", justifyContent:"space-between", fontSize:13, color:C.text, marginBottom:8, fontWeight:"bold"}}>
+                                <span>基本月租金{f.mode==="multi"?" (各機台總和)":""} (${(sumRent/cycle).toLocaleString()} x {cycle}個月)</span>
+                                <span>${Math.round(sumRent).toLocaleString()}</span>
+                              </div>
+                            )}
+
+                            <div style={{display:"flex", justifyContent:"space-between", fontSize:13, color:C.text, marginBottom:8, fontWeight:"bold"}}>
+                              <span>黑白超印 <span style={{fontSize:11, color:C.muted, marginLeft:4, fontWeight:"normal"}}>(總印 {sumBwRaw.toLocaleString()} - 扣/額 = 超出 {sumBwOver.toLocaleString()} 張)</span></span>
+                              <span>${Math.round(sumBwFee).toLocaleString()}</span>
+                            </div>
+
+                            {(f.mode==="single"?f.machineType!=="bw":true) && (
+                              <div style={{display:"flex", justifyContent:"space-between", fontSize:13, color:C.text, marginBottom:8, fontWeight:"bold"}}>
+                                <span>彩色超印 <span style={{fontSize:11, color:C.muted, marginLeft:4, fontWeight:"normal"}}>(總印 {sumColRaw.toLocaleString()} - 扣/額 = 超出 {sumColOver.toLocaleString()} 張)</span></span>
+                                <span>${Math.round(sumColFee).toLocaleString()}</span>
+                              </div>
+                            )}
+
+                            {(f.taxMode === "外加" || f.overageTaxMode === "外加") && (
+                               <div style={{display:"flex", justifyContent:"space-between", fontSize:13, color:C.navy, marginBottom:8, fontWeight:"bold", marginTop: 8, paddingTop: 8, borderTop:"1px dashed #CCC"}}>
+                                 <span>外加營業稅 (5%) <span style={{fontSize:11, color:C.muted, marginLeft:4, fontWeight:"normal"}}>[租金:{f.taxMode==="外加"?"外加":f.taxMode} / 超印:{f.overageTaxMode==="外加"?"外加":f.overageTaxMode}]</span></span>
+                                 <span>+ ${Math.round(tax).toLocaleString()}</span>
+                               </div>
+                            )}
+                          </div>
+
+                          <div style={{background:C.navy,borderRadius:6,padding:16,marginBottom:16,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                            <div>
+                              <div style={{color:"rgba(255,255,255,.9)",fontSize:14,fontWeight:"bold",marginBottom:4}}>本期預估應收合計</div>
+                            </div>
+                            <div style={{fontSize:28,fontWeight:"bold",color:C.accent}}>${Math.round(liveTotal).toLocaleString()}</div>
+                          </div>
+                        </>
+                      )
+                    })()}
+                    
+                    <div style={{display:"flex",gap:12}}>
+                      <button style={{...btnS("accent"),flex:1}} onClick={()=>handleSave(true)}>💾 儲存並預覽帳單</button>
+                      <button style={{...btnS("light"),flex:1}} onClick={()=>handleSave(false)}>儲存（不印）</button>
+                    </div>
+                  </>)}
+                </div>
+              </div>
+            );
+          }
+
+          if(page==="clients"){
+            const ec=editClient;
+            const updEc=p=>setEditClient(prev=>({...prev,...p}));
+            const updMachineEc = (idx, field, val) => {
+              const nm = [...(ec.machines||[])];
+              nm[idx] = {...nm[idx], [field]: val};
+              updEc({machines: nm});
+            };
+            
+            async function saveEditClient(){
+              if(!ec.name?.trim()) return alert("請填寫客戶名稱");
+              setLoadingText("儲存中..."); setLoading(true);
+              
+              const payloadMs = [...(ec.machines||[]).filter(m => !m._isSettings), {
+                  _isSettings: true,
+                  taxMode: ec.taxMode || "未稅",
+                  overageTaxMode: ec.overageTaxMode || "未稅",
+                  machineType: ec.machineType || "color",
+                  multiCalcMode: ec.multiCalcMode || "pooled"
+              }];
+
+              try { await api("saveClient",{client:{...ec,id:ec._isNew?String(Date.now()):ec.id, machines: payloadMs, _isNew:undefined}}); await load(false); setEditClient(null); }
+              catch(e){ alert("儲存失敗"); }
+              setLoading(false);
+            }
+            async function deleteClient(id){
+              if(!confirm("確定要刪除此客戶資料嗎？")) return;
+              setLoadingText("刪除中..."); setLoading(true);
+              try { await api("deleteClient",{clientId:id}); await load(false); }
+              catch(e){ alert("刪除失敗"); }
+              setLoading(false);
+            }
+            
+            if(ec) return (
+              <div style={{fontFamily:"'新細明體', 'PMingLiU', serif",minHeight:"100vh",background:C.bg,paddingBottom:40}}>
+                {loading&&<Loading text={loadingText}/>}
+                <div style={{background:C.navy,padding:"16px 20px",display:"flex",alignItems:"center",gap:16}}>
+                  <button onClick={()=>setEditClient(null)} style={{background:"none",border:"none",color:"#FFF",cursor:"pointer",fontSize:18}}>←</button>
+                  <div><div style={{fontSize:11,letterSpacing:4,color:C.accent}}>CLIENTS</div><div style={{color:"#FFF",fontSize:18,fontWeight:"bold"}}>{ec._isNew?"新增客戶":"編輯客戶"}</div></div>
+                </div>
+                <div style={{padding:"20px 16px",maxWidth:600,margin:"0 auto"}}>
+                  <div style={{background:"#FFF",borderRadius:6,padding:20,marginBottom:16}}>
+                    <div style={{marginBottom:14}}><label style={lbl}>客戶名稱 *</label><input style={inp()} value={ec.name||""} onChange={e=>updEc({name:e.target.value})}/></div>
+                    
+                    <div style={{borderTop:"1px solid "+C.light, paddingTop:12, marginBottom:16, display:"grid", gridTemplateColumns:"1fr 1fr", gap:12}}>
+                       <div>
+                           <label style={{...lbl, fontWeight:"bold", color:C.navy}}>基本租金計稅方式</label>
+                           <TogglePill options={[{label:"未稅",val:"未稅"},{label:"外加(+5%)",val:"外加"},{label:"內含",val:"內含"}]} value={ec.taxMode||"未稅"} onChange={v=>updEc({taxMode:v})} />
+                       </div>
+                       <div>
+                           <label style={{...lbl, fontWeight:"bold", color:C.danger}}>超印費用計稅方式</label>
+                           <TogglePill options={[{label:"未稅",val:"未稅"},{label:"外加(+5%)",val:"外加"},{label:"內含",val:"內含"}]} value={ec.overageTaxMode||ec.taxMode||"未稅"} onChange={v=>updEc({overageTaxMode:v})} />
+                       </div>
+                    </div>
+
+                    <div style={{display:"flex",marginBottom:16,border:"2px solid "+C.navy,borderRadius:4,overflow:"hidden"}}>
+                      {["single","multi"].map(m=><button key={m} onClick={()=>updEc({mode:m})} style={{flex:1,padding:"8px",border:"none",cursor:"pointer",fontFamily:"'新細明體', 'PMingLiU', serif",fontSize:12,fontWeight:"bold",background:ec.mode===m?C.navy:"#FFF",color:ec.mode===m?"#FFF":C.navy}}>{m==="single"?"單台":"多台 (合併計算)"}</button>)}
+                    </div>
+                    
+                    {ec.mode==="single"&&(
+                      <>
+                        <div style={{marginBottom:16}}>
+                           <label style={{...lbl, fontWeight:"bold", color:C.navy}}>機型種類</label>
+                           <TogglePill options={[{label:"黑白機",val:"bw"},{label:"彩色機 (含黑白)",val:"color"}]} value={ec.machineType||"color"} onChange={v=>updEc({machineType:v})} />
+                        </div>
+                        <div style={{marginBottom:14}}><label style={lbl}>機型</label><input style={inp()} value={ec.model||""} onChange={e=>updEc({model:e.target.value})} placeholder="例：MPC3503"/></div>
+                        <div style={{display:"grid",gridTemplateColumns: ec.machineType==="bw"?"1fr 1fr":"1fr 1fr 1fr 1fr",gap:10,marginBottom:14}}>
+                          <div><label style={lbl}>單月黑白額度</label><input style={inp()} value={ec.bwQuota||""} onChange={e=>updEc({bwQuota:e.target.value})} placeholder="0"/></div>
+                          <div><label style={lbl}>黑白單價</label><input style={inp()} value={ec.bwPrice||"0.35"} onChange={e=>updEc({bwPrice:e.target.value})}/></div>
+                          {ec.machineType !== "bw" && (
+                            <>
+                              <div><label style={lbl}>單月彩色額度</label><input style={inp()} value={ec.colQuota||""} onChange={e=>updEc({colQuota:e.target.value})} placeholder="0"/></div>
+                              <div><label style={lbl}>彩色單價</label><input style={inp()} value={ec.colPrice||"3.5"} onChange={e=>updEc({colPrice:e.target.value})}/></div>
+                            </>
+                          )}
+                        </div>
+                        <div style={{background:C.blueBg,border:"1px solid "+C.blueBorder,borderRadius:4,padding:14,marginBottom:14}}>
+                          <div style={{fontSize:11,color:C.blue,letterSpacing:2,marginBottom:10,fontWeight:"bold"}}>💰 基本租金</div>
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                            <div><label style={lbl}>金額（元/單月）</label><input style={inp()} value={ec.baseRent||""} onChange={e=>updEc({baseRent:e.target.value})} placeholder="0"/></div>
+                            <div><label style={lbl}>備註</label><input style={inp()} value={ec.rentNote||""} onChange={e=>updEc({rentNote:e.target.value})} placeholder="月租金"/></div>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                    
+                    {ec.mode==="multi"&&(
+                      <div>
+                        <div style={{marginBottom:16}}>
+                           <label style={{...lbl, fontWeight:"bold", color:C.navy}}>多台超印計算方式</label>
+                           <TogglePill options={[{label:"各機台獨立計算",val:"separate"},{label:"總額度合併計算",val:"pooled"}]} value={ec.multiCalcMode||"pooled"} onChange={v=>updEc({multiCalcMode:v})} />
+                        </div>
+                        {ec.multiCalcMode === "pooled" && (
+                           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16,background:C.bg,padding:14,borderRadius:4}}>
+                             <div><label style={{...lbl,fontWeight:"bold",color:C.navy}}>統一黑白單價</label><input style={inp({border:"2px solid "+C.navy})} value={ec.mBwPrice||""} onChange={e=>updEc({mBwPrice:e.target.value})}/></div>
+                             <div><label style={{...lbl,fontWeight:"bold",color:C.navy}}>統一彩色單價</label><input style={inp({border:"2px solid "+C.navy})} value={ec.mColPrice||""} onChange={e=>updEc({mColPrice:e.target.value})}/></div>
+                           </div>
+                        )}
+
+                        <div style={{fontSize:11,color:C.navy,letterSpacing:2,marginBottom:10,fontWeight:"bold"}}>獨立機台設定</div>
+                        {(ec.machines||[]).map((m, i)=>(
+                          <div key={m.id} style={{background:C.bg, padding:14, borderRadius:6, marginBottom:12, border:"1px solid "+C.light}}>
+                            <div style={{display:"flex", justifyContent:"space-between", marginBottom:8}}>
+                              <span style={{fontWeight:"bold", color:C.navy}}>機台 {i+1}</span>
+                              {(ec.machines||[]).length>1 && <button onClick={()=>updEc({machines:(ec.machines||[]).filter((_,j)=>j!==i)})} style={{border:"none",background:"none",color:C.danger,cursor:"pointer",fontWeight:"bold"}}>✕</button>}
+                            </div>
+                            <div style={{marginBottom:8}}>
+                               <TogglePill options={[{label:"黑白機",val:"bw"},{label:"彩色機",val:"color"}]} value={m.type||"color"} onChange={v=>updMachineEc(i,"type",v)} />
+                            </div>
+                            <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:10}}>
+                              <div><label style={lbl}>機型 / 地點</label><input style={inp()} value={m.model||""} onChange={e=>updMachineEc(i,"model",e.target.value)} placeholder="例：MPC3503"/></div>
+                              <div><label style={lbl}>單月基本租金</label><input style={inp()} value={m.baseRent||""} onChange={e=>updMachineEc(i,"baseRent",e.target.value)} placeholder="0"/></div>
+                            </div>
+                            <div style={{display:"grid", gridTemplateColumns: m.type==="bw"?"1fr":"1fr 1fr", gap:10, marginBottom:10}}>
+                              <div><label style={lbl}>本機單月黑白額度</label><input style={inp()} value={m.bwQuota||""} onChange={e=>updMachineEc(i,"bwQuota",e.target.value)} placeholder="0"/></div>
+                              {m.type !== "bw" && <div><label style={lbl}>本機單月彩色額度</label><input style={inp()} value={m.colQuota||""} onChange={e=>updMachineEc(i,"colQuota",e.target.value)} placeholder="0"/></div>}
+                            </div>
+                            {ec.multiCalcMode === "separate" && (
+                               <div style={{display:"grid", gridTemplateColumns: m.type==="bw"?"1fr":"1fr 1fr", gap:10, paddingTop:8, borderTop:"1px dashed #DDD"}}>
+                                 <div><label style={{...lbl,color:C.danger}}>本機黑白單價</label><input style={inp({border:"1px solid "+C.danger})} value={m.bwPrice||""} onChange={e=>updMachineEc(i,"bwPrice",e.target.value)}/></div>
+                                 {m.type !== "bw" && <div><label style={{...lbl,color:C.danger}}>本機彩色單價</label><input style={inp({border:"1px solid "+C.danger})} value={m.colPrice||""} onChange={e=>updMachineEc(i,"colPrice",e.target.value)}/></div>}
+                               </div>
+                            )}
+                          </div>
+                        ))}
+                        <button onClick={()=>updEc({machines:[...(ec.machines||[]), emptyMachine()]})} style={{...btnS("light"),fontSize:12,padding:"6px 14px",width:"100%"}}>＋ 新增機台</button>
+                      </div>
+                    )}
+                  </div>
+                  <div style={{display:"flex",gap:12}}>
+                    <button style={{...btnS("primary"),flex:1}} onClick={saveEditClient}>✓ 儲存</button>
+                    <button style={{...btnS("light"),flex:1}} onClick={()=>setEditClient(null)}>取消</button>
+                  </div>
+                </div>
+              </div>
+            );
+            
+            return (
+              <div style={{fontFamily:"'新細明體', 'PMingLiU', serif",minHeight:"100vh",background:C.bg,paddingBottom:40}}>
+                {loading&&<Loading text={loadingText}/>}
+                <div style={{background:C.navy,padding:"16px 20px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:16}}>
+                    <button onClick={()=>setPage("home")} style={{background:"none",border:"none",color:"#FFF",cursor:"pointer",fontSize:18}}>←</button>
+                    <div><div style={{fontSize:11,letterSpacing:4,color:C.accent}}>CLIENTS</div><div style={{color:"#FFF",fontSize:18,fontWeight:"bold"}}>客戶資料管理</div></div>
+                  </div>
+                  <button style={btnS("accent",{fontSize:13,padding:"8px 16px"})} onClick={()=>setEditClient({_isNew:true,mode:"single",taxMode:"未稅",overageTaxMode:"未稅",machineType:"color",multiCalcMode:"pooled",machines:[emptyMachine()]})}>＋ 新增</button>
+                </div>
+                <div style={{padding:"16px",maxWidth:720,margin:"0 auto"}}>
+                  {clients.length===0&&<div style={{textAlign:"center",color:C.muted,padding:60,fontWeight:"bold"}}>尚無客戶資料</div>}
+                  {clients.map(c=>(
+                    <div key={c.id} style={{background:"#FFF",borderRadius:6,padding:16,marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <div>
+                        <div style={{fontWeight:"bold",fontSize:16}}>{c.name}</div>
+                        <div style={{fontSize:12,color:C.muted,marginTop:3}}>{c.mode==="single"?"單台":"多台"} ｜ 租:{c.taxMode||"未稅"} / 超印:{c.overageTaxMode||c.taxMode||"未稅"} ｜ {c.machineType==="bw"?"黑白機":"彩色機"}</div>
+                      </div>
+                      <div style={{display:"flex",gap:8}}>
+                        <button onClick={()=>setEditClient({...c})} style={{...btnS("light"),padding:"6px 14px",fontSize:12}}>編輯</button>
+                        <button onClick={()=>deleteClient(c.id)} style={{...btnS("red"),padding:"6px 14px",fontSize:12}}>刪除</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          }
+
+          if(page==="history") return (
+            <div style={{fontFamily:"'新細明體', 'PMingLiU', serif",minHeight:"100vh",background:C.bg,paddingBottom:40}}>
+              {loading&&<Loading text={loadingText}/>}
+              <div style={{background:C.navy,padding:"16px 20px",display:"flex",alignItems:"center",gap:16}}>
+                <button onClick={()=>setPage("home")} style={{background:"none",border:"none",color:"#FFF",cursor:"pointer",fontSize:18}}>←</button>
+                <div><div style={{fontSize:11,letterSpacing:4,color:C.accent}}>HISTORY</div><div style={{color:"#FFF",fontSize:18,fontWeight:"bold"}}>歷史查詢</div></div>
+              </div>
+              <div style={{padding:"16px",maxWidth:720,margin:"0 auto"}}>
+                
+                <div style={{background:"#FFF",borderRadius:6,padding:16,marginBottom:16,display:"flex",gap:10,flexWrap:"wrap"}}>
+                  <div style={{flex:1,minWidth:80}}><label style={lbl}>年度</label><input style={inp()} value={fYear} onChange={e=>setFYear(e.target.value)} placeholder="全部"/></div>
+                  <div style={{flex:1,minWidth:80}}><label style={lbl}>月份</label><select style={inp()} value={fMonth} onChange={e=>setFMonth(e.target.value)}><option value="">全部</option>{MONTHS.map((m,i)=><option key={i} value={String(i+1)}>{m}</option>)}</select></div>
+                  <div style={{flex:2,minWidth:140, position: "relative"}}>
+                    <label style={lbl}>客戶名稱</label>
+                    <input 
+                      style={inp()} 
+                      value={fClient} 
+                      onChange={e => { setFClient(e.target.value); setShowHistDropdown(true); }}
+                      onFocus={() => setShowHistDropdown(true)}
+                      onBlur={() => setTimeout(()=>setShowHistDropdown(false), 200)}
+                      placeholder="輸入關鍵字篩選..."
+                    />
+                    {showHistDropdown && (
+                      <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "#FFF", border: "1px solid "+C.light, borderTop: "none", borderRadius: "0 0 6px 6px", boxShadow: "0 8px 24px rgba(0,0,0,0.15)", zIndex: 100, maxHeight: "250px", overflowY: "auto" }}>
+                        <div onClick={() => { setFClient(""); setShowHistDropdown(false); }} onMouseDown={(e) => e.preventDefault()} style={{ padding: "10px 14px", borderBottom: "1px solid #F5F5F5", cursor: "pointer", fontSize: 13, color: C.muted }}>[ 顯示全部客戶 ]</div>
+                        {clients.filter(c => c.name.toLowerCase().includes(fClient.toLowerCase())).map(c => (
+                          <div
+                            key={c.id}
+                            onClick={() => { setFClient(c.name); setShowHistDropdown(false); }}
+                            onMouseDown={(e) => e.preventDefault()} 
+                            style={{ padding: "10px 14px", borderBottom: "1px solid #F5F5F5", cursor: "pointer", fontSize: 14, color: C.navy, fontWeight:"bold" }}
+                          >
+                            {c.name}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div style={{fontSize:12,color:C.muted,marginBottom:10,fontWeight:"bold"}}>共 {filtered.length} 筆</div>
+                
+                {filtered.map(r=>(
+                  <div key={r.id} style={{background:"#FFF",borderRadius:6,padding:16,marginBottom:10,cursor:"pointer",borderLeft:"4px solid "+(r.total>0?C.danger:C.success)}} onClick={()=>{setPrintData(r);setPage("preview")}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <div>
+                        <div style={{fontWeight:"bold",fontSize:16}}>{r.clientName}</div>
+                        <div style={{fontSize:12,color:C.muted,marginTop:4}}>民國 {r.billingYear} 年 {r.billingMonth} 月 ｜ {r.billingCycle||1}個月結 ｜ 租:{r.taxMode||"未稅"} / 超:{r.overageTaxMode||r.taxMode||"未稅"}</div>
+                      </div>
+                      <div style={{textAlign:"right"}}>
+                        <div style={{fontSize:20,fontWeight:"bold",color:r.total>0?C.danger:C.success}}>${Math.round(Number(r.total)).toLocaleString()}</div>
+                        <div style={{display:"flex", gap:8, justifyContent:"flex-end", marginTop: 6}}>
+                          <button onClick={(e)=>{e.stopPropagation(); setPrintData(r); setPage("preview");}} style={{...btnS("light"), padding:"4px 10px", fontSize:11}}>預覽帳單</button>
+                          <button onClick={(e)=>{e.stopPropagation(); deleteHistoryRecord(r.id);}} style={{...btnS("red"), padding:"4px 10px", fontSize:11}}>刪除</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+
+          if(page==="preview"&&printData){
+            const r=printData,isSingle=r.mode==="single", cycle = r.billingCycle || 1;
+            
+            let gRent = Number(r.baseRent)||0;
+            let gOverage = (r.bwFee||0) + (r.colFee||0);
+
+            const rentTaxAmount = r.taxMode === "外加" ? Math.round(gRent * 0.05) : 0;
+            const overageTaxAmount = r.overageTaxMode === "外加" ? Math.round(gOverage * 0.05) : 0;
+
+            const showMachineFee = isSingle || r.multiCalcMode === "separate";
+
+            const renderMachineTable = (m, idx, isOnlyMachine) => {
+               const d_bw = m.bw || {current: m.bwCur, prev: m.bwPrev, raw: m.bwActual||0, deduct:0, actual:m.bwActual||0, quota:0, price:0, fee:0};
+               const d_col = m.col || {current: m.colCur, prev: m.colPrev, raw: m.colActual||0, deduct:0, actual:m.colActual||0, quota:0, price:0, fee:0};
+               const hasD = (Number(d_bw.deduct)||0)>0 || (Number(d_col.deduct)||0)>0;
+               const mType = m.type || (isOnlyMachine ? r.machineType : "color"); 
+
+               const headers = showMachineFee 
+                  ? ["項目","本期錶號","上期錶號","總印量","扣除張數","計費印量","本期總額度","超出張數","單價","費用"]
+                  : ["項目","本期錶號","上期錶號","總印量","扣除張數","計費印量","本期總額度"];
+
+               const rows = [ {lb:"黑白列印", d:d_bw} ];
+               if (mType !== "bw") rows.push({lb:"彩色列印", d:d_col});
+
+               return (
+                  <div key={idx} style={{marginBottom: 24}}>
+                      {!isOnlyMachine && <div style={{fontSize:13,letterSpacing:2,color:C.navy,marginBottom:8,fontWeight:"bold",borderBottom:"2px solid "+C.navy,paddingBottom:4}}>機台 {idx+1}：{m.model||"—"}</div>}
+                      {isOnlyMachine && <div style={{fontSize:10,letterSpacing:3,color:C.navy,marginBottom:8,fontWeight:"bold"}}>超印費用　機型：{r.model||"—"}</div>}
+                      
+                      {Number(m.baseRent) > 0 && (
+                        <div style={{marginBottom:10, display:"flex", justifyContent:"space-between", borderTop:"2px solid #000", borderBottom:"2px solid #000", padding:"8px 12px"}}>
+                           <span style={{fontWeight:"bold", color:"#000"}}>本期基本租金 (已乘月數) {m.rentNote?"("+m.rentNote+")":""}</span>
+                           <span style={{fontWeight:"bold", color:"#000"}}>${Math.round(Number(m.baseRent)).toLocaleString()}</span>
+                        </div>
+                      )}
+
+                      <table style={{width:"100%",borderCollapse:"collapse",marginBottom:hasD?10:14}}>
+                        <thead><tr style={{borderTop:"2px solid #000", borderBottom:"2px solid #000"}}>
+                            {headers.map(h=><th key={h} style={{padding:"10px 7px",color:"#000",fontSize:12,textAlign:h==="項目"?"left":"right",fontWeight:"bold"}}>{h}</th>)}
+                        </tr></thead>
+                        <tbody>
+                            {rows.map(({lb,d}, i)=>(
+                              <tr key={lb}>
+                                 <td style={{padding:"10px 7px",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{lb}</td>
+                                 <td style={{padding:"10px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{Number(d.current||0).toLocaleString()}</td>
+                                 <td style={{padding:"10px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{Number(d.prev||0).toLocaleString()}</td>
+                                 <td style={{padding:"10px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{Number(d.raw||0).toLocaleString()}</td>
+                                 <td style={{padding:"10px 7px",textAlign:"right",fontWeight:"bold",color:(Number(d.deduct)||0)>0?"#000":"#999",borderBottom:"1px dashed #CCC"}}>{(Number(d.deduct)||0)>0?"-"+Number(d.deduct).toLocaleString():"—"}</td>
+                                 <td style={{padding:"10px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{Number(d.actual||0).toLocaleString()}</td>
+                                 <td style={{padding:"10px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{Number(d.quota||0).toLocaleString()}</td>
+                                 {showMachineFee && <td style={{padding:"10px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{Number(d.over||0).toLocaleString()}</td>}
+                                 {showMachineFee && <td style={{padding:"10px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>${d.price}</td>}
+                                 {showMachineFee && <td style={{padding:"10px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{(d.fee||0)>0?"$"+Math.round(Number(d.fee)).toLocaleString():"未超印"}</td>}
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                      {hasD&&<div style={{border:"1px solid #000",borderRadius:4,padding:"8px 14px",fontSize:11,color:"#000",fontWeight:"bold"}}>🔧 維修扣除：{(Number(d_bw.deduct)||0)>0&&<span style={{marginLeft:8}}>黑白 -{Number(d_bw.deduct).toLocaleString()} 張{d_bw.note?" （"+d_bw.note+"）":""}</span>}{(Number(d_col.deduct)||0)>0&&<span style={{marginLeft:8}}>彩色 -{Number(d_col.deduct).toLocaleString()} 張{d_col.note?" （"+d_col.note+"）":""}</span>}</div>}
+                  </div>
+               );
+            };
+
+            return (
+              <div style={{fontFamily:"'新細明體', 'PMingLiU', serif",minHeight:"100vh",background:"#CCC"}}>
+                <div style={{background:C.navy,padding:"12px 20px",display:"flex",gap:12,alignItems:"center",justifyContent:"space-between"}}>
+                  <button onClick={()=>setPage("history")} style={{background:"none",border:"none",color:"#FFF",cursor:"pointer",fontSize:18}}>←</button>
+                  <span style={{color:"#FFF",fontWeight:"bold"}}>帳單預覽</span>
+                  <button style={btnS("accent")} onClick={()=>{injectPrint();setTimeout(()=>window.print(),100)}}>🖨️ 列印</button>
+                </div>
+                <div style={{padding:"24px 16px",display:"flex",justifyContent:"center"}}>
+                  
+                  <div id="print-area" style={{background:"#FFF",width:"100%",maxWidth:700,padding:"44px 52px",boxSizing:"border-box",boxShadow:"0 4px 24px rgba(0,0,0,.15)"}}>
+                    
+                    <div style={{borderBottom:"3px solid #000",paddingBottom:20,marginBottom:24}}>
+                      <div style={{display:"flex",justifyContent:"space-between"}}>
+                        <div><div style={{fontSize:24,fontWeight:"bold",color:"#000",letterSpacing:2}}>影印機租用費用明細</div><div style={{fontSize:11,color:"#000",marginTop:4,letterSpacing:1,fontWeight:"bold"}}>COPIER USAGE BILLING STATEMENT</div></div>
+                        <div style={{textAlign:"right"}}><div style={{fontSize:10,color:"#000",fontWeight:"bold"}}>帳單日期</div><div style={{fontSize:13,color:"#000",fontWeight:"bold"}}>{new Date().toLocaleDateString("zh-TW")}</div></div>
+                      </div>
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:24,marginBottom:24,padding:"16px 20px",border:"1px solid #000",borderRadius:4}}>
+                      <div><div style={{fontSize:10,letterSpacing:3,color:"#000",marginBottom:4,fontWeight:"bold"}}>客戶名稱</div><div style={{fontSize:20,fontWeight:"bold",color:"#000"}}>{r.clientName}</div></div>
+                      <div>
+                        <div style={{fontSize:10,letterSpacing:3,color:"#000",marginBottom:4,fontWeight:"bold"}}>計費月份 ({cycle} 個月結)</div>
+                        <div style={{fontSize:15,color:"#000",fontWeight:"bold"}}>民國 {r.billingYear} 年 {r.billingMonth} 月</div>
+                        {r.periodStart&&r.periodEnd&&<div style={{fontSize:11,color:"#000",marginTop:2,fontWeight:"bold"}}>{r.periodStart.substring(0,10)} ～ {r.periodEnd.substring(0,10)}</div>}
+                      </div>
+                    </div>
+                    
+                    {isSingle && r.baseRent>0 && <div style={{marginBottom:18}}><div style={{fontSize:10,letterSpacing:3,color:"#000",marginBottom:8,fontWeight:"bold"}}>基本租金 (小計)</div><table style={{width:"100%",borderCollapse:"collapse"}}><tbody><tr><td style={{padding:"12px 14px",fontWeight:"bold",color:"#000",borderTop:"2px solid #000",borderBottom:"2px solid #000"}}>基本租金費用{r.rentNote?" （"+r.rentNote+"）":""}</td><td style={{padding:"12px 14px",textAlign:"right",fontSize:16,fontWeight:"bold",color:"#000",borderTop:"2px solid #000",borderBottom:"2px solid #000"}}>${Math.round(Number(r.baseRent)).toLocaleString()}</td></tr></tbody></table></div>}
+                    
+                    {isSingle ? renderMachineTable({type:r.machineType, model:r.model, bw:r.bw, col:r.col, baseRent:0}, 0, true) : (r.machines||[]).map((m, idx) => renderMachineTable(m, idx, false))}
+
+                    {!isSingle && r.multiCalcMode === "pooled" && (<>
+                      <div style={{fontSize:11,letterSpacing:3,color:"#000",marginBottom:8,fontWeight:"bold"}}>超印費用合併計算</div>
+                      <table style={{width:"100%",borderCollapse:"collapse",marginBottom:14}}>
+                        <thead><tr style={{borderTop:"2px solid #000", borderBottom:"2px solid #000"}}>{["計費項目","總印量","扣除張數","計費印量","本期總額度","超出張數","單價","費用"].map(h=><th key={h} style={{padding:"10px 10px",color:"#000",fontSize:12,textAlign:h==="計費項目"?"left":"right",fontWeight:"bold"}}>{h}</th>)}</tr></thead>
+                        <tbody>{[{lb:"黑白列印",raw:r.totalBwRaw,deduct:r.bwDeduct,actual:r.bwActual,quota:r.bwQuota,over:r.bwOver,price:r.bwPrice,fee:r.bwFee},{lb:"彩色列印",raw:r.totalColRaw,deduct:r.colDeduct,actual:r.colActual,quota:r.colQuota,over:r.colOver,price:r.colPrice,fee:r.colFee}].map(({lb,raw,deduct,actual,quota,over,price,fee},i)=>(
+                          <tr key={lb}>
+                            <td style={{padding:"10px",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{lb}</td>
+                            <td style={{padding:"10px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{Number(raw||0).toLocaleString()}</td>
+                            <td style={{padding:"10px",textAlign:"right",fontWeight:"bold",color:(Number(deduct)||0)>0?"#000":"#999",borderBottom:"1px dashed #CCC"}}>{(Number(deduct)||0)>0?"-"+Number(deduct).toLocaleString():"—"}</td>
+                            <td style={{padding:"10px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{Number(actual||0).toLocaleString()}</td>
+                            <td style={{padding:"10px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{Number(quota||0).toLocaleString()}</td>
+                            <td style={{padding:"10px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{Number(over||0).toLocaleString()}</td>
+                            <td style={{padding:"10px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>${price}</td>
+                            <td style={{padding:"10px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{(fee||0)>0?"$"+Math.round(Number(fee)).toLocaleString():"未超印"}</td>
+                          </tr>
+                        ))}</tbody>
+                      </table>
+                    </>)}
+
+                    <div style={{borderTop:"3px solid #000",paddingTop:16,marginTop:20}}>
+                      <div style={{display:"flex",justifyContent:"flex-end",gap:24,marginBottom:5,fontSize:13,color:"#000",fontWeight:"bold"}}>
+                          <span>週期租金總計 ({cycle}個月) {r.taxMode==="內含"?"(內含稅)":r.taxMode==="外加"?"(未稅)":""}</span>
+                          <span style={{minWidth:90,textAlign:"right"}}>${Math.round(gRent).toLocaleString()}</span>
+                      </div>
+                      <div style={{display:"flex",justifyContent:"flex-end",gap:24,marginBottom:5,fontSize:13,color:"#000",fontWeight:"bold"}}>
+                          <span>本期超印費用總計 {r.overageTaxMode==="內含"?"(內含稅)":r.overageTaxMode==="外加"?"(未稅)":""}</span>
+                          <span style={{minWidth:90,textAlign:"right"}}>${Math.round(gOverage).toLocaleString()}</span>
+                      </div>
+                      
+                      {(r.taxMode==="外加" || r.overageTaxMode==="外加") && (
+                         <div style={{display:"flex",justifyContent:"flex-end",gap:24,marginBottom:5,fontSize:13,color:"#000",fontWeight:"bold"}}>
+                            <span>外加營業稅 (5%) <span style={{fontSize:11, color:C.muted, marginLeft:4, fontWeight:"normal"}}>[租金:{r.taxMode==="內含"?"內含":r.taxMode} / 超印:{r.overageTaxMode==="內含"?"內含":r.overageTaxMode}]</span></span>
+                            <span style={{minWidth:90,textAlign:"right"}}>${Math.round((rentTaxAmount || 0) + (overageTaxAmount || 0)).toLocaleString()}</span>
+                         </div>
+                      )}
+
+                      <div style={{display:"flex",justifyContent:"flex-end",alignItems:"center",gap:24, marginTop: 10, borderTop: (r.taxMode==="外加"||r.overageTaxMode==="外加")?"1px solid #000":"none", paddingTop: (r.taxMode==="外加"||r.overageTaxMode==="外加")?10:0}}>
+                        <span style={{fontSize:13,color:"#000",letterSpacing:2,fontWeight:"bold"}}>本期總計應收（新台幣）</span>
+                        <span style={{fontSize:32,fontWeight:"bold",color:"#000"}}>${Math.round(Number(r.total)).toLocaleString()}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          }
+          
+          return null;
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
