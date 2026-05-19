@@ -46,6 +46,21 @@
         
         function injectPrint(){ if(!document.getElementById("dp")){ const s=document.createElement("style");s.id="dp";s.textContent=PRINT_CSS;document.head.appendChild(s); } }
 
+        // 修正時區問題：Google Sheets 回傳的日期可能是 UTC ISO 字串，直接 substring 會少一天
+        function fixDate(str) {
+          if (!str) return "";
+          const s = String(str);
+          // 純 YYYY-MM-DD，直接回傳
+          if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+          // 含時區的 ISO 字串，用本地時間重新組合，避免 UTC 偏移造成日期少一天
+          const d = new Date(s);
+          if (isNaN(d.getTime())) return s.substring(0, 10);
+          const y = d.getFullYear();
+          const m = String(d.getMonth() + 1).padStart(2, '0');
+          const day = String(d.getDate()).padStart(2, '0');
+          return `${y}-${m}-${day}`;
+        }
+
         function safeParse(val, fallback) {
             if (typeof val === 'string') {
                 try { return JSON.parse(val); } catch(e) { return fallback; }
@@ -100,6 +115,7 @@
           const [printData, setPrintData] = useState(null);
           const [fYear,setFYear]=useState(""); const [fMonth,setFMonth]=useState(""); const [fClient,setFClient]=useState("");
           const [editClient, setEditClient] = useState(null);
+          const [editRecordId, setEditRecordId] = useState(null); // 編輯模式：存放被編輯的記錄 ID
           const [apiReady] = useState(API_URL !== "https://script.google.com/macros/s/YOUR_SCRIPT_ID/exec");
           
           const [showDropdown, setShowDropdown] = useState(false);
@@ -332,16 +348,73 @@
             };
           }
 
+          // 將已存記錄轉回表單格式（供編輯用）
+          function editRecordToForm(r) {
+            const cycle = Number(r.billingCycle) || 1;
+            const isSingle = r.mode === "single";
+            return {
+              clientId: r.clientId || "",
+              clientName: r.clientName || "",
+              taxMode: r.taxMode || "未稅",
+              overageTaxMode: r.overageTaxMode || "未稅",
+              billingYear: String(r.billingYear || ""),
+              billingMonth: String(r.billingMonth || ""),
+              billingCycle: String(r.billingCycle || "1"),
+              periodStart: fixDate(r.periodStart || ""),
+              periodEnd: fixDate(r.periodEnd || ""),
+              baseRent: isSingle ? String(Math.round((Number(r.baseRent)||0) / cycle)) : "",
+              rentNote: r.rentNote || "",
+              mode: r.mode || "single",
+              machineType: r.machineType || "color",
+              multiCalcMode: r.multiCalcMode || "pooled",
+              model: r.model || "",
+              bwPrev: isSingle ? String(r.bw?.prev || "") : "",
+              bwCur:  isSingle ? String(r.bw?.current || "") : "",
+              bwQuota: isSingle ? String(Math.round((Number(r.bw?.quota)||0) / cycle)) : "",
+              bwPrice: isSingle ? String(r.bw?.price || "0.35") : "0.35",
+              bwDeduct: isSingle ? String(r.bw?.deduct || "") : "",
+              bwDeductNote: isSingle ? (r.bw?.note || "") : "",
+              colPrev: isSingle ? String(r.col?.prev || "") : "",
+              colCur:  isSingle ? String(r.col?.current || "") : "",
+              colQuota: isSingle ? String(Math.round((Number(r.col?.quota)||0) / cycle)) : "",
+              colPrice: isSingle ? String(r.col?.price || "3.5") : "3.5",
+              colDeduct: isSingle ? String(r.col?.deduct || "") : "",
+              colDeductNote: isSingle ? (r.col?.note || "") : "",
+              mBwPrice: String(r.bwPrice || "0.35"),
+              mColPrice: String(r.colPrice || "3.5"),
+              machines: !isSingle ? (r.machines || []).map(m => ({
+                ...emptyMachine(),
+                ...m,
+                id: m.id || Date.now() + Math.random(),
+                type: m.type || "color",
+                bwCur:  String(m.bw?.current !== undefined ? m.bw.current : (m.bwCur || "")),
+                bwPrev: String(m.bw?.prev    !== undefined ? m.bw.prev    : (m.bwPrev || "")),
+                bwQuota: String(Math.round((Number(m.bw?.quota || m.bwQuota)||0) / cycle)),
+                bwPrice: String(m.bw?.price || m.bwPrice || "0.35"),
+                bwDeduct: String(m.bw?.deduct || m.bwDeduct || ""),
+                bwDeductNote: m.bw?.note || m.bwDeductNote || "",
+                colCur:  String(m.col?.current !== undefined ? m.col.current : (m.colCur || "")),
+                colPrev: String(m.col?.prev    !== undefined ? m.col.prev    : (m.colPrev || "")),
+                colQuota: String(Math.round((Number(m.col?.quota || m.colQuota)||0) / cycle)),
+                colPrice: String(m.col?.price || m.colPrice || "3.5"),
+                colDeduct: String(m.col?.deduct || m.colDeduct || ""),
+                colDeductNote: m.col?.note || m.colDeductNote || "",
+                baseRent: String(m.baseRent || ""),
+              })) : [emptyMachine()],
+            };
+          }
+
           async function handleSave(andPrint=false){
             if(!f.clientName.trim()) return alert("請輸入客戶名稱");
-            setLoadingText("儲存中..."); setLoading(true);
+            setLoadingText(editRecordId ? "更新中..." : "儲存中..."); setLoading(true);
             try {
               const cid=await upsertClientProfile(f);
               const rec=buildRecord(cid);
+              if (editRecordId) rec.id = editRecordId; // 編輯模式：覆蓋原記錄 ID
               await api("saveRecord",{record:rec});
               await load(false);
-              if(andPrint){ setPrintData(rec); setPage("preview"); }
-              else{ alert("已儲存！"); setF(emptyForm()); setPage("home"); }
+              if(andPrint){ setPrintData(rec); setPage("preview"); setEditRecordId(null); }
+              else{ alert(editRecordId ? "✅ 已更新記錄！" : "已儲存！"); setF(emptyForm()); setEditRecordId(null); setPage(editRecordId ? "history" : "home"); }
             } catch(e){ alert("儲存失敗："+e.message); }
             setLoading(false);
           }
@@ -378,7 +451,7 @@
                 <div style={{marginTop:12,fontSize:11,color:C.success,fontWeight:"bold"}}>● 連線至 Google Sheets</div>
               </div>
               <div style={{display:"flex",flexDirection:"column",gap:14,width:"100%",maxWidth:320}}>
-                <button style={btnS("primary",{width:"100%"})} onClick={()=>{setF(emptyForm());setPage("input")}}>＋ 新增本月印量記錄</button>
+                <button style={btnS("primary",{width:"100%"})} onClick={()=>{setEditRecordId(null);setF(emptyForm());setPage("input")}}>＋ 新增本月印量記錄</button>
                 <button style={btnS("light",{width:"100%"})} onClick={()=>{load();setPage("history")}}>📋 查詢歷史記錄</button>
                 <button style={btnS("light",{width:"100%"})} onClick={()=>setPage("clients")}>👥 管理客戶資料</button>
               </div>
@@ -393,8 +466,12 @@
               <div style={{fontFamily:"'新細明體', 'PMingLiU', serif",minHeight:"100vh",background:C.bg,paddingBottom:40}}>
                 {loading&&<Loading text={loadingText}/>}
                 <div style={{background:C.navy,padding:"16px 20px",display:"flex",alignItems:"center",gap:16}}>
-                  <button onClick={()=>setPage("home")} style={{background:"none",border:"none",color:"#FFF",cursor:"pointer",fontSize:18}}>←</button>
-                  <div><div style={{fontSize:11,letterSpacing:4,color:C.accent}}>NEW RECORD</div><div style={{color:"#FFF",fontSize:18,fontWeight:"bold"}}>新增印量記錄</div></div>
+                  <button onClick={()=>{ setEditRecordId(null); setPage(editRecordId ? "history" : "home"); }} style={{background:"none",border:"none",color:"#FFF",cursor:"pointer",fontSize:18}}>←</button>
+                  <div>
+                    <div style={{fontSize:11,letterSpacing:4,color:C.accent}}>{editRecordId ? "EDIT RECORD" : "NEW RECORD"}</div>
+                    <div style={{color:"#FFF",fontSize:18,fontWeight:"bold"}}>{editRecordId ? "✏️ 編輯印量記錄" : "新增印量記錄"}</div>
+                  </div>
+                  {editRecordId && <div style={{marginLeft:"auto",background:C.accent,color:"#FFF",borderRadius:4,padding:"4px 10px",fontSize:11,fontWeight:"bold"}}>編輯模式</div>}
                 </div>
                 <div style={{padding:"20px 16px",maxWidth:640,margin:"0 auto"}}>
                   
@@ -902,6 +979,7 @@
                         <div style={{fontSize:20,fontWeight:"bold",color:r.total>0?C.danger:C.success}}>${Math.round(Number(r.total)).toLocaleString()}</div>
                         <div style={{display:"flex", gap:8, justifyContent:"flex-end", marginTop: 6}}>
                           <button onClick={(e)=>{e.stopPropagation(); setPrintData(r); setPage("preview");}} style={{...btnS("light"), padding:"4px 10px", fontSize:11}}>預覽帳單</button>
+                          <button onClick={(e)=>{e.stopPropagation(); setEditRecordId(r.id); setF(editRecordToForm(r)); setPage("input");}} style={{...btnS("accent"), padding:"4px 10px", fontSize:11}}>✏️ 編輯</button>
                           <button onClick={(e)=>{e.stopPropagation(); deleteHistoryRecord(r.id);}} style={{...btnS("red"), padding:"4px 10px", fontSize:11}}>刪除</button>
                         </div>
                       </div>
@@ -996,7 +1074,7 @@
                       <div>
                         <div style={{fontSize:10,letterSpacing:3,color:"#000",marginBottom:4,fontWeight:"bold"}}>計費月份 ({cycle} 個月結)</div>
                         <div style={{fontSize:15,color:"#000",fontWeight:"bold"}}>民國 {r.billingYear} 年 {r.billingMonth} 月</div>
-                        {r.periodStart&&r.periodEnd&&<div style={{fontSize:11,color:"#000",marginTop:2,fontWeight:"bold"}}>{r.periodStart.substring(0,10)} ～ {r.periodEnd.substring(0,10)}</div>}
+                        {r.periodStart&&r.periodEnd&&<div style={{fontSize:11,color:"#000",marginTop:2,fontWeight:"bold"}}>{fixDate(r.periodStart)} ～ {fixDate(r.periodEnd)}</div>}
                       </div>
                     </div>
                     
