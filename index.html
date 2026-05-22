@@ -84,15 +84,30 @@
           return {raw, actual, over, fee: Math.round(over * safePrice)}; 
         }
         
-        const emptyMachine = () => ({ id: Date.now()+Math.random(), type: "color", model: "", baseRent: "", rentNote: "", bwCur: "", bwPrev: "", bwQuota: "", bwPrice:"0.35", bwDeduct: "", bwDeductNote: "", colCur: "", colPrev: "", colQuota: "", colPrice:"3.5", colDeduct: "", colDeductNote: "" });
+        const emptyMachine = () => ({ id: Date.now()+Math.random(), type: "color", model: "", baseRent: "", rentNote: "", bwCur: "", bwPrev: "", bwQuota: "", bwPrice:"0.35", bwDeduct: "", bwDeductNote: "", colCur: "", colPrev: "", colQuota: "", colPrice:"3.5", colDeduct: "", colDeductNote: "", machineSwapped:false, bwNewInit:"", bwNewCur:"", colNewInit:"", colNewCur:"" });
 
         function emptyForm(){
-          return { clientId:"", clientName:"", taxMode:"未稅", overageTaxMode:"未稅", billingYear:String(CY), billingMonth:String(now.getMonth()+1), billingCycle:"1", periodStart:"", periodEnd:"", baseRent:"", rentNote:"", mode:"single", machineType:"color", multiCalcMode:"pooled", model:"", bwPrev:"", bwCur:"", bwQuota:"", bwPrice:"0.35", bwDeduct:"", bwDeductNote:"", colPrev:"", colCur:"", colQuota:"", colPrice:"3.5", colDeduct:"", colDeductNote:"", mBwPrice:"0.35", mColPrice:"3.5", machines:[emptyMachine()] };
+          return { clientId:"", clientName:"", taxMode:"未稅", overageTaxMode:"未稅", billingYear:String(CY), billingMonth:String(now.getMonth()+1), billingCycle:"1", periodStart:"", periodEnd:"", baseRent:"", rentNote:"", mode:"single", machineType:"color", multiCalcMode:"pooled", model:"", bwPrev:"", bwCur:"", bwQuota:"", bwPrice:"0.35", bwDeduct:"", bwDeductNote:"", colPrev:"", colCur:"", colQuota:"", colPrice:"3.5", colDeduct:"", colDeductNote:"", mBwPrice:"0.35", mColPrice:"3.5", machines:[emptyMachine()], machineSwapped:false, bwNewInit:"", bwNewCur:"", colNewInit:"", colNewCur:"" };
         }
 
         async function api(action, body={}) {
-          const res = await fetch(API_URL, { method:"POST", body: JSON.stringify({action,...body}) });
-          return res.json();
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 25000); // 25秒逾時
+          try {
+            const res = await fetch(API_URL, { 
+              method:"POST", 
+              body: JSON.stringify({action,...body}),
+              signal: controller.signal
+            });
+            clearTimeout(timer);
+            const text = await res.text();
+            try { return JSON.parse(text); }
+            catch(e) { throw new Error("伺服器回應格式錯誤（非 JSON）。GAS 可能正在更新，請稍後再試。"); }
+          } catch(e) {
+            clearTimeout(timer);
+            if(e.name === 'AbortError') throw new Error("連線逾時（超過 25 秒），請確認網路並重試");
+            throw e;
+          }
         }
 
         function Loading({ text="載入中..." }) {
@@ -120,6 +135,7 @@
           
           const [showDropdown, setShowDropdown] = useState(false);
           const [showHistDropdown, setShowHistDropdown] = useState(false);
+          const [loadError, setLoadError] = useState("");
 
           const upd = p => setF(prev=>({...prev,...p}));
           const updMachine = (id,field,val) => upd({machines:f.machines.map(m=>m.id===id?{...m,[field]:val}:m)});
@@ -163,7 +179,12 @@
               
               setClients(parsedClients);
               setRecords(parsedRecords);
-            } catch(e){ alert("連線失敗，請確認 API 網址是否正確"); }
+              setLoadError("");
+            } catch(e){ 
+              const msg = e?.message || String(e);
+              setLoadError(msg);
+              if(showLoad) alert("載入失敗：" + msg + "\n\n可點畫面上的「重新連線」按鈕重試。");
+            }
             setLoading(false);
           }, [apiReady]);
 
@@ -213,12 +234,12 @@
                        colQuota: cm.colQuota !== undefined ? cm.colQuota : "",
                        colPrice: cm.colPrice !== undefined ? cm.colPrice : (client.mColPrice || "3.5"),
                        baseRent: cm.baseRent !== undefined ? cm.baseRent : (i===0 ? (client.baseRent||"") : ""),
-                       bwPrev: pm ? String(pm.bwCur || pm.bwActual || "") : "",
-                       colPrev: pm ? String(pm.colCur || pm.colActual || "") : ""
+                       bwPrev: pm ? String((pm.bw?.newInit!==undefined&&pm.bw?.newInit!=="") ? pm.bw.newInit : (pm.bwCur || pm.bwActual || "")) : "",
+                       colPrev: pm ? String((pm.col?.newInit!==undefined&&pm.col?.newInit!=="") ? pm.col.newInit : (pm.colCur || pm.colActual || "")) : ""
                     };
                  });
               } else {
-                 if(prev) { patch.bwPrev=String(pbw?.current||""); patch.colPrev=String(pcol?.current||""); }
+                 if(prev) { patch.bwPrev=String((pbw?.newInit!==undefined&&pbw?.newInit!=="") ? pbw.newInit : (pbw?.current||"")); patch.colPrev=String((pcol?.newInit!==undefined&&pcol?.newInit!=="") ? pcol.newInit : (pcol?.current||"")); }
                  else { patch.bwPrev=""; patch.colPrev=""; }
               }
               upd(patch);
@@ -257,15 +278,33 @@
             const cycle = Number(f.billingCycle) || 1;
             let totalRent = 0, totalOverage = 0;
             
-            const bw = calcFee(f.bwCur,f.bwPrev,f.bwQuota,f.bwPrice,f.bwDeduct, cycle); 
-            const col = f.machineType === "bw" ? {raw:0, actual:0, over:0, fee:0, current:"", prev:"", quota:"", price:"", deduct:0} : calcFee(f.colCur,f.colPrev,f.colQuota,f.colPrice,f.colDeduct, cycle);
+            // 換機模式：總印量 = 舊機印量 + 新機印量
+            const bwNewExtra = f.machineSwapped ? Math.max(0,(Number(f.bwNewCur)||0)-(Number(f.bwNewInit)||0)) : 0;
+            const colNewExtra = f.machineSwapped ? Math.max(0,(Number(f.colNewCur)||0)-(Number(f.colNewInit)||0)) : 0;
+            const bwCalc = calcFee(f.bwCur,f.bwPrev,f.bwQuota,f.bwPrice,f.bwDeduct, cycle);
+            const colCalcBase = f.machineType === "bw" ? {raw:0, actual:0, over:0, fee:0} : calcFee(f.colCur,f.colPrev,f.colQuota,f.colPrice,f.colDeduct, cycle);
+            // 把新機印量加入，重新計算超印
+            const bwRawTotal = bwCalc.raw + bwNewExtra;
+            const bwActualTotal = Math.max(0, bwRawTotal - (Number(f.bwDeduct)||0));
+            const bwQuotaTotal = (Number(f.bwQuota)||0)*cycle;
+            const bwOverTotal = Math.max(0, bwActualTotal - bwQuotaTotal);
+            const bw = { ...bwCalc, raw: bwRawTotal, actual: bwActualTotal, over: bwOverTotal, fee: Math.round(bwOverTotal*(Number(f.bwPrice)||0)) };
+            const colRawTotal = colCalcBase.raw + colNewExtra;
+            const colActualTotal = Math.max(0, colRawTotal - (Number(f.colDeduct)||0));
+            const colQuotaTotal = (Number(f.colQuota)||0)*cycle;
+            const colOverTotal = Math.max(0, colActualTotal - colQuotaTotal);
+            const col = f.machineType === "bw" ? {raw:0, actual:0, over:0, fee:0, current:"", prev:"", quota:"", price:"", deduct:0} : { ...colCalcBase, raw: colRawTotal, actual: colActualTotal, over: colOverTotal, fee: Math.round(colOverTotal*(Number(f.colPrice)||0)) };
             
             let tBwRaw=0, tBwQuota=0, tBwDeduct=0, tBwOver=0, tBwFee=0;
             let tColRaw=0, tColQuota=0, tColDeduct=0, tColOver=0, tColFee=0;
 
             const ms = f.machines.map(m => {
-               const mBwRaw = Math.max(0,(Number(m.bwCur)||0)-(Number(m.bwPrev)||0));
-               const mColRaw = m.type === "bw" ? 0 : Math.max(0,(Number(m.colCur)||0)-(Number(m.colPrev)||0));
+               const mBwOldRaw = Math.max(0,(Number(m.bwCur)||0)-(Number(m.bwPrev)||0));
+               const mBwNewRaw = m.machineSwapped ? Math.max(0,(Number(m.bwNewCur)||0)-(Number(m.bwNewInit)||0)) : 0;
+               const mBwRaw = mBwOldRaw + mBwNewRaw;
+               const mColOldRaw = m.type === "bw" ? 0 : Math.max(0,(Number(m.colCur)||0)-(Number(m.colPrev)||0));
+               const mColNewRaw = (m.machineSwapped && m.type !== "bw") ? Math.max(0,(Number(m.colNewCur)||0)-(Number(m.colNewInit)||0)) : 0;
+               const mColRaw = mColOldRaw + mColNewRaw;
                
                const mBwActual = Math.max(0, mBwRaw - (Number(m.bwDeduct)||0));
                const mColActual = Math.max(0, mColRaw - (Number(m.colDeduct)||0));
@@ -284,8 +323,24 @@
                
                return {
                   ...m,
-                  bw: { current:m.bwCur, prev:m.bwPrev, raw:mBwRaw, actual:mBwActual, quota: (Number(m.bwQuota)||0)*cycle, deduct:m.bwDeduct, note:m.bwDeductNote, over:mBwOverCalc, price:currentBwPrice, fee:mBwFeeCalc },
-                  col: { current:m.colCur, prev:m.colPrev, raw:mColRaw, actual:mColActual, quota: (Number(m.colQuota)||0)*cycle, deduct:m.colDeduct, note:m.colDeductNote, over:mColOverCalc, price:currentColPrice, fee:mColFeeCalc },
+                  bw: { current:m.bwCur, prev:m.bwPrev, raw:mBwRaw, actual:mBwActual, quota:(Number(m.bwQuota)||0)*cycle, deduct:m.bwDeduct, note:m.bwDeductNote, over:mBwOverCalc, price:currentBwPrice, fee:mBwFeeCalc,
+                    ...(m.machineSwapped ? {
+                      machineSwapped:true,
+                      oldRaw: mBwOldRaw,
+                      newMachineInit: m.bwNewInit, newMachineCur: m.bwNewCur,
+                      newRaw: mBwNewRaw,
+                      newInit: m.bwNewCur
+                    } : {})
+                  },
+                  col: { current:m.colCur, prev:m.colPrev, raw:mColRaw, actual:mColActual, quota:(Number(m.colQuota)||0)*cycle, deduct:m.colDeduct, note:m.colDeductNote, over:mColOverCalc, price:currentColPrice, fee:mColFeeCalc,
+                    ...(m.machineSwapped ? {
+                      machineSwapped:true,
+                      oldRaw: mColOldRaw,
+                      newMachineInit: m.colNewInit, newMachineCur: m.colNewCur,
+                      newRaw: mColNewRaw,
+                      newInit: m.colNewCur
+                    } : {})
+                  },
                   bwActual: mBwActual, colActual: mColActual 
                };
             });
@@ -326,8 +381,24 @@
                id:Date.now(), clientId, mode:f.mode, clientName:f.clientName, billingYear:f.billingYear, billingMonth:f.billingMonth, billingCycle:cycle, periodStart:f.periodStart, periodEnd:f.periodEnd,
                taxMode:f.taxMode, overageTaxMode:f.overageTaxMode, machineType:f.machineType, multiCalcMode:f.multiCalcMode,
                baseRent:totalRent, rentNote:isSingle?f.rentNote:"", model:f.model,
-               bw:{current:f.bwCur,prev:f.bwPrev,quota:(Number(f.bwQuota)||0)*cycle,price:f.bwPrice,deduct:f.bwDeduct,note:f.bwDeductNote,...bw},
-               col:{current:f.colCur,prev:f.colPrev,quota:(Number(f.colQuota)||0)*cycle,price:f.colPrice,deduct:f.colDeduct,note:f.colDeductNote,...col},
+               bw:{current:f.bwCur,prev:f.bwPrev,quota:(Number(f.bwQuota)||0)*cycle,price:f.bwPrice,deduct:f.bwDeduct,note:f.bwDeductNote,...bw,
+                 ...(f.machineSwapped ? {
+                   machineSwapped:true,
+                   oldRaw: Math.max(0,(Number(f.bwCur)||0)-(Number(f.bwPrev)||0)),
+                   newMachineInit: f.bwNewInit, newMachineCur: f.bwNewCur,
+                   newRaw: Math.max(0,(Number(f.bwNewCur)||0)-(Number(f.bwNewInit)||0)),
+                   newInit: f.bwNewCur
+                 } : {})
+               },
+               col:{current:f.colCur,prev:f.colPrev,quota:(Number(f.colQuota)||0)*cycle,price:f.colPrice,deduct:f.colDeduct,note:f.colDeductNote,...col,
+                 ...(f.machineSwapped ? {
+                   machineSwapped:true,
+                   oldRaw: Math.max(0,(Number(f.colCur)||0)-(Number(f.colPrev)||0)),
+                   newMachineInit: f.colNewInit, newMachineCur: f.colNewCur,
+                   newRaw: Math.max(0,(Number(f.colNewCur)||0)-(Number(f.colNewInit)||0)),
+                   newInit: f.colNewCur
+                 } : {})
+               },
                machines:ms, 
                totalBwRaw: isSingle ? bw.raw : tBwRaw, 
                totalColRaw: isSingle ? col.raw : tColRaw,
@@ -364,6 +435,7 @@
               periodEnd: fixDate(r.periodEnd || ""),
               baseRent: isSingle ? String(Math.round((Number(r.baseRent)||0) / cycle)) : "",
               rentNote: r.rentNote || "",
+              machineSwapped: false, bwNewInit: "", colNewInit: "",
               mode: r.mode || "single",
               machineType: r.machineType || "color",
               multiCalcMode: r.multiCalcMode || "pooled",
@@ -456,6 +528,13 @@
                 <button style={btnS("light",{width:"100%"})} onClick={()=>setPage("clients")}>👥 管理客戶資料</button>
               </div>
               <div style={{marginTop:48,fontSize:12,color:C.muted}}>已儲存 {records.length} 筆記錄 · {clients.length} 位客戶</div>
+              {loadError && (
+                <div style={{marginTop:16,background:"#FFF0F0",border:"1px solid "+C.danger,borderRadius:6,padding:"12px 16px",maxWidth:320,textAlign:"left"}}>
+                  <div style={{fontSize:12,color:C.danger,fontWeight:"bold",marginBottom:6}}>⚠️ 上次載入失敗</div>
+                  <div style={{fontSize:11,color:C.danger,marginBottom:8}}>{loadError}</div>
+                  <button style={btnS("red",{fontSize:12,padding:"6px 16px"})} onClick={()=>load()}>🔄 重新連線</button>
+                </div>
+              )}
             </div>
           );
 
@@ -523,7 +602,29 @@
                     <div style={{background:"#FFF",borderRadius:6,padding:20,marginBottom:16,borderLeft:"4px solid "+C.light}}>
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
                         <div><label style={lbl}>年度（民國）</label><input style={inp()} value={f.billingYear} onChange={e=>upd({billingYear:e.target.value})}/></div>
-                        <div><label style={lbl}>月份</label><select style={inp()} value={f.billingMonth} onChange={e=>upd({billingMonth:e.target.value})}>{MONTHS.map((m,i)=><option key={i} value={String(i+1)}>{m}</option>)}</select></div>
+                        <div><label style={lbl}>結算月份</label><select style={inp()} value={f.billingMonth} onChange={e=>upd({billingMonth:e.target.value})}>{MONTHS.map((m,i)=><option key={i} value={String(i+1)}>{m}</option>)}</select></div>
+                      </div>
+                      <div style={{marginBottom:12}}>
+                        <label style={{...lbl, fontWeight:"bold", color:C.danger}}>計費週期（幾個月結一次帳）</label>
+                        <select style={inp({border:"2px solid "+C.danger})} value={f.billingCycle} onChange={e=>upd({billingCycle:e.target.value})}>
+                          {[1,2,3,4,5,6,7,8,9,10,11,12].map(n=>{
+                            const tag=n===1?" (月繳)":n===3?" (季繳)":n===6?" (半年繳)":n===12?" (年繳)":"";
+                            return <option key={n} value={String(n)}>{n} 個月{tag}</option>;
+                          })}
+                        </select>
+                        {(()=>{
+                          const cycle=Number(f.billingCycle)||1;
+                          const endM=Number(f.billingMonth);
+                          const endY=Number(f.billingYear)||CY;
+                          if(cycle<=1) return null;
+                          const months=[];
+                          for(let i=cycle-1;i>=0;i--){
+                            let m=endM-i; let y=endY;
+                            if(m<=0){m+=12;y-=1;}
+                            months.push(`${y}年${m}月`);
+                          }
+                          return <div style={{marginTop:6,padding:"6px 10px",background:"#FFF7ED",border:"1px solid #F0C070",borderRadius:4,fontSize:12,color:"#7A5000",fontWeight:"bold"}}>📅 本期結算涵蓋：{months.join(" ＋ ")}</div>;
+                        })()}
                       </div>
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
                         <div><label style={lbl}>計費起日</label><input style={inp()} type="date" value={f.periodStart||""} onChange={e=>upd({periodStart:e.target.value})}/></div>
@@ -557,10 +658,8 @@
 
                         <div style={{background:C.blueBg,border:"1px solid "+C.blueBorder,borderRadius:4,padding:14,marginBottom:14}}>
                           <div style={{fontSize:11,letterSpacing:3,color:C.blue,marginBottom:10,fontWeight:"bold"}}>💰 基本租金（選填）</div>
-                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-                            <div><label style={lbl}>金額（元/單月）</label><input style={inp()} value={f.baseRent||""} onChange={e=>upd({baseRent:e.target.value})} placeholder="0"/></div>
-                            <div><label style={lbl}>備註</label><input style={inp()} value={f.rentNote||""} onChange={e=>upd({rentNote:e.target.value})} placeholder="月租金"/></div>
-                          </div>
+                          <div style={{marginBottom:10}}><label style={lbl}>金額（元/單月）</label><input style={inp()} value={f.baseRent||""} onChange={e=>upd({baseRent:e.target.value})} placeholder="0"/></div>
+                          <div><label style={{...lbl,color:C.blue}}>備註（可填繳費方式、說明等）</label><input style={inp()} value={f.rentNote||""} onChange={e=>upd({rentNote:e.target.value})} placeholder="例：季繳 / 月租金含影印紙"/></div>
                           {Number(f.billingCycle) > 1 && <div style={{fontSize:11, color:C.blue, marginTop:6}}>* 系統將自動計算 {f.billingCycle} 個月的總金額：${(Number(f.baseRent)||0) * Number(f.billingCycle)}</div>}
                         </div>
 
@@ -571,9 +670,45 @@
                           ...(f.machineType==="bw" ? [] : [{title:"🔴 彩色列印", ck:"colCur", pk:"colPrev", qk:"colQuota", prk:"colPrice", ddk:"colDeduct", nk:"colDeductNote"}]) 
                         ].map(({title,ck,pk,qk,prk,ddk,nk})=>{
                           const result = calcFee(f[ck],f[pk],f[qk],f[prk],f[ddk], f.billingCycle);
+                          const isSwapped = f.machineSwapped;
+                          const newInitKey = ck==="bwCur"?"bwNewInit":"colNewInit";
+                          const newCurKey  = ck==="bwCur"?"bwNewCur":"colNewCur";
+                          // 換機時：舊機印量 + 新機印量 → 試算顯示
+                          const oldRaw  = Math.max(0,(Number(f[ck])||0)-(Number(f[pk])||0));
+                          const newRaw  = isSwapped ? Math.max(0,(Number(f[newCurKey])||0)-(Number(f[newInitKey])||0)) : 0;
+                          const swapRaw = oldRaw + newRaw;
+                          const swapActual = Math.max(0, swapRaw-(Number(f[ddk])||0));
+                          const swapQuota  = (Number(f[qk])||0)*Number(f.billingCycle);
+                          const swapOver   = Math.max(0, swapActual - swapQuota);
+                          const swapFee    = Math.round(swapOver*(Number(f[prk])||0));
                           return (
                             <div key={title} style={{marginBottom:20,padding:14,background:C.bg,borderRadius:4, border:"1px solid "+C.light}}>
-                              <div style={{fontWeight:"bold",marginBottom:12,color:C.navy,fontSize:15}}>{title}</div>
+                              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                                <div style={{fontWeight:"bold",color:C.navy,fontSize:15}}>{title}</div>
+                                <button onClick={()=>upd({machineSwapped:!isSwapped,bwNewInit:"",bwNewCur:"",colNewInit:"",colNewCur:""})} style={{fontSize:11,padding:"3px 10px",borderRadius:4,border:"2px solid "+(isSwapped?C.danger:C.muted),background:isSwapped?"#FFF0F0":"#F5F5F5",color:isSwapped?C.danger:C.muted,cursor:"pointer",fontWeight:"bold",fontFamily:"'新細明體', 'PMingLiU', serif"}}>
+                                  {isSwapped?"🔄 換機模式 ON ✓":"🔄 本期有換機?"}
+                                </button>
+                              </div>
+                              {isSwapped && (
+                                <div style={{background:"#FFF0F0",border:"2px solid "+C.danger,borderRadius:4,padding:12,marginBottom:12}}>
+                                  <div style={{fontSize:12,fontWeight:"bold",color:C.danger,marginBottom:10}}>⚠️ 換機結算 — 舊機印量＋新機印量合併計算</div>
+                                  <div style={{fontSize:11,color:C.muted,marginBottom:10}}>舊機部分（安裝到換機日）＋ 新機部分（換機日到本次結算）</div>
+                                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10,padding:10,background:"#FFF5F5",borderRadius:4,border:"1px dashed "+C.danger}}>
+                                    <div style={{gridColumn:"span 2",fontSize:11,fontWeight:"bold",color:C.danger,marginBottom:4}}>📌 舊機（結算舊機剩餘印量）</div>
+                                    <div><label style={{...lbl,color:C.danger,fontWeight:"bold"}}>舊機最終錶號</label><input style={inp({border:"2px solid "+C.danger,background:"#FFF8F8"})} value={f[ck]||""} onChange={e=>upd({[ck]:e.target.value})} placeholder="舊機拆除前的錶號"/></div>
+                                    <div><label style={{...lbl,color:C.muted}}>上期錶號（舊機）</label><input style={inp({background:"#F5F5F5"})} value={f[pk]||""} onChange={e=>upd({[pk]:e.target.value})} placeholder="0"/></div>
+                                  </div>
+                                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,padding:10,background:"#F0FFF4",borderRadius:4,border:"1px dashed "+C.success}}>
+                                    <div style={{gridColumn:"span 2",fontSize:11,fontWeight:"bold",color:C.success,marginBottom:4}}>🆕 新機（換機日到本次結算）</div>
+                                    <div><label style={{...lbl,color:C.muted}}>新機安裝初始錶號</label><input style={inp({background:"#F5F5F5"})} value={f[newInitKey]||""} onChange={e=>upd({[newInitKey]:e.target.value})} placeholder="安裝當下的錶號（如 0）"/></div>
+                                    <div><label style={{...lbl,color:C.success,fontWeight:"bold"}}>🔵 新機本期錶號</label><input style={inp({border:"2px solid "+C.success,background:"#F0FFF4"})} value={f[newCurKey]||""} onChange={e=>upd({[newCurKey]:e.target.value})} placeholder="本次抄表數字"/></div>
+                                  </div>
+                                  {(f[ck]||f[newCurKey])&&<div style={{marginTop:10,fontSize:12,fontWeight:"bold",color:swapOver>0?C.danger:C.success}}>
+                                    舊機 {oldRaw.toLocaleString()} ＋ 新機 {newRaw.toLocaleString()} ＝ 合計 {swapRaw.toLocaleString()} 張 ｜ {swapOver>0?"超出 "+swapOver.toLocaleString()+" 張 → $"+swapFee.toLocaleString():"✓ 未超出額度"}
+                                  </div>}
+                                </div>
+                              )}
+                              {!isSwapped && (
                               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10}}>
                                 <div><label style={{...lbl,color:C.navy,fontWeight:"bold"}}>🔵 本期錶號</label><input style={inp({border:"2px solid "+C.navy,background:"#F0F4FF"})} value={f[ck]||""} onChange={e=>upd({[ck]:e.target.value})} placeholder="填抄表數字"/></div>
                                 <div><label style={lbl}>上期錶號</label><input style={inp({background:"#F5F5F5"})} value={f[pk]||""} onChange={e=>upd({[pk]:e.target.value})} placeholder="0"/></div>
@@ -582,7 +717,8 @@
                                 <div><label style={lbl}>🔧 扣除張數</label><input style={inp()} value={f[ddk]||""} onChange={e=>upd({[ddk]:e.target.value})} placeholder="0"/></div>
                                 <div style={{gridColumn:"span 3"}}><label style={lbl}>🔧 扣除備註</label><input style={inp()} value={f[nk]||""} onChange={e=>upd({[nk]:e.target.value})} placeholder="換零件等..."/></div>
                               </div>
-                              {f[ck]&&<div style={{marginTop:10,fontSize:13,fontWeight:"bold",color:result.over>0?C.danger:C.success}}>總印量 {result.raw.toLocaleString()}{(Number(f[ddk])||0)>0?" → 扣除後計費 "+result.actual.toLocaleString():""} ｜ {result.over>0?"超出 "+result.over.toLocaleString()+" 張 → $"+Math.round(result.fee).toLocaleString():"✓ 未超出額度 (本期總額度: "+((Number(f[qk])||0)*Number(f.billingCycle))+")"}</div>}
+                              )}
+                              {!isSwapped && f[ck]&&<div style={{marginTop:10,fontSize:13,fontWeight:"bold",color:result.over>0?C.danger:C.success}}>總印量 {result.raw.toLocaleString()}{(Number(f[ddk])||0)>0?" → 扣除後計費 "+result.actual.toLocaleString():""} ｜ {result.over>0?"超出 "+result.over.toLocaleString()+" 張 → $"+Math.round(result.fee).toLocaleString():"✓ 未超出額度 (本期總額度: "+((Number(f[qk])||0)*Number(f.billingCycle))+")"}</div>}
                             </div>
                           )
                         })}
@@ -596,6 +732,11 @@
                         <div style={{marginBottom:16}}>
                            <label style={{...lbl, fontWeight:"bold", color:C.navy}}>多台超印計算方式</label>
                            <TogglePill options={[{label:"各機台獨立計算 (各點不同單價)",val:"separate"},{label:"總額度合併計算 (全公司統一單價)",val:"pooled"}]} value={f.multiCalcMode} onChange={v=>upd({multiCalcMode:v})} />
+                        </div>
+
+                        <div style={{background:C.blueBg,border:"1px solid "+C.blueBorder,borderRadius:4,padding:12,marginBottom:16}}>
+                          <label style={{...lbl,color:C.blue,fontWeight:"bold"}}>📝 整體備註（繳費方式、合約說明等）</label>
+                          <input style={inp()} value={f.rentNote||""} onChange={e=>upd({rentNote:e.target.value})} placeholder="例：季繳 / 年繳含耗材 / 合約到期日..."/>
                         </div>
 
                         {f.multiCalcMode === "pooled" && (
@@ -618,11 +759,31 @@
 
                               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
                                 <div><label style={lbl}>本機單月基本租金</label><input style={inp()} value={m.baseRent||""} onChange={e=>updMachine(m.id,"baseRent",e.target.value)} placeholder="0"/></div>
-                                <div><label style={lbl}>租金備註</label><input style={inp()} value={m.rentNote||""} onChange={e=>updMachine(m.id,"rentNote",e.target.value)} placeholder="例：2F業務部"/></div>
+                                <div style={{display:"flex",alignItems:"flex-end",justifyContent:"flex-end"}}>
+                                  <button onClick={()=>updMachine(m.id,"machineSwapped",!m.machineSwapped)} style={{fontSize:11,padding:"6px 10px",borderRadius:4,border:"2px solid "+(m.machineSwapped?C.danger:C.muted),background:m.machineSwapped?"#FFF0F0":"#F5F5F5",color:m.machineSwapped?C.danger:C.muted,cursor:"pointer",fontWeight:"bold",fontFamily:"'新細明體', 'PMingLiU', serif",whiteSpace:"nowrap"}}>
+                                    {m.machineSwapped?"🔄 換機 ON ✓":"🔄 換機?"}
+                                  </button>
+                                </div>
                               </div>
+                              <div style={{marginBottom:12}}><label style={{...lbl,color:C.blue}}>部門 / 地點備註</label><input style={inp()} value={m.rentNote||""} onChange={e=>updMachine(m.id,"rentNote",e.target.value)} placeholder="例：2F業務部 / 3F會計部 / 北館"/></div>
                               
                               <div style={{marginBottom:14, borderTop:"1px dashed #DDD", paddingTop:10}}>
                                 <div style={{fontSize:13,fontWeight:"bold",color:C.navy,marginBottom:8}}>⚫ 黑白列印</div>
+                                {m.machineSwapped ? (
+                                  <div style={{background:"#FFF0F0",border:"2px solid "+C.danger,borderRadius:4,padding:10,marginBottom:8}}>
+                                    <div style={{fontSize:11,fontWeight:"bold",color:C.danger,marginBottom:8}}>⚠️ 換機結算 — 舊機＋新機合併計算</div>
+                                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8,padding:8,background:"#FFF5F5",borderRadius:4,border:"1px dashed "+C.danger}}>
+                                      <div style={{gridColumn:"span 2",fontSize:11,fontWeight:"bold",color:C.danger,marginBottom:2}}>📌 舊機</div>
+                                      <div><label style={{...lbl,color:C.danger,fontWeight:"bold"}}>舊機最終錶號</label><input style={inp({border:"2px solid "+C.danger,background:"#FFF8F8"})} value={m.bwCur||""} onChange={e=>updMachine(m.id,"bwCur",e.target.value)} placeholder="舊機拆除前錶號"/></div>
+                                      <div><label style={lbl}>上期錶號（舊機）</label><input style={inp({background:"#F5F5F5"})} value={m.bwPrev||""} onChange={e=>updMachine(m.id,"bwPrev",e.target.value)} placeholder="0"/></div>
+                                    </div>
+                                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,padding:8,background:"#F0FFF4",borderRadius:4,border:"1px dashed "+C.success}}>
+                                      <div style={{gridColumn:"span 2",fontSize:11,fontWeight:"bold",color:C.success,marginBottom:2}}>🆕 新機</div>
+                                      <div><label style={{...lbl,color:C.muted}}>新機安裝初始錶號</label><input style={inp({background:"#F5F5F5"})} value={m.bwNewInit||""} onChange={e=>updMachine(m.id,"bwNewInit",e.target.value)} placeholder="安裝當下錶號（如 0）"/></div>
+                                      <div><label style={{...lbl,color:C.success,fontWeight:"bold"}}>🔵 新機本期錶號</label><input style={inp({border:"2px solid "+C.success,background:"#F0FFF4"})} value={m.bwNewCur||""} onChange={e=>updMachine(m.id,"bwNewCur",e.target.value)} placeholder="本次抄表數字"/></div>
+                                    </div>
+                                  </div>
+                                ) : (
                                 <div style={{display:"grid",gridTemplateColumns: f.multiCalcMode==="separate" ? "1fr 1fr 1fr 1fr 1fr" : "1fr 1fr 1fr 1fr", gap:8}}>
                                   <div><label style={{...lbl,color:C.navy,fontWeight:"bold"}}>本期🔵</label><input style={inp({border:"2px solid "+C.navy})} value={m.bwCur||""} onChange={e=>updMachine(m.id,"bwCur",e.target.value)}/></div>
                                   <div><label style={lbl}>上期</label><input style={inp({background:"#F5F5F5"})} value={m.bwPrev||""} onChange={e=>updMachine(m.id,"bwPrev",e.target.value)}/></div>
@@ -631,11 +792,27 @@
                                   <div><label style={lbl}>扣除張數</label><input style={inp()} value={m.bwDeduct||""} onChange={e=>updMachine(m.id,"bwDeduct",e.target.value)}/></div>
                                   <div style={{gridColumn: f.multiCalcMode==="separate"?"span 5":"span 4"}}><label style={lbl}>扣除備註</label><input style={inp()} value={m.bwDeductNote||""} onChange={e=>updMachine(m.id,"bwDeductNote",e.target.value)} placeholder="可填寫扣除原因"/></div>
                                 </div>
+                                )}
                               </div>
 
                               {m.type === "bw" ? null : (
                                 <div style={{borderTop:"1px dashed #DDD", paddingTop:10}}>
                                   <div style={{fontSize:13,fontWeight:"bold",color:C.danger,marginBottom:8}}>🔴 彩色列印</div>
+                                  {m.machineSwapped ? (
+                                    <div style={{background:"#FFF5F0",border:"2px solid "+C.danger,borderRadius:4,padding:10}}>
+                                      <div style={{fontSize:11,fontWeight:"bold",color:C.danger,marginBottom:8}}>⚠️ 換機結算 — 舊機＋新機合併計算</div>
+                                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8,padding:8,background:"#FFF5F5",borderRadius:4,border:"1px dashed "+C.danger}}>
+                                        <div style={{gridColumn:"span 2",fontSize:11,fontWeight:"bold",color:C.danger,marginBottom:2}}>📌 舊機</div>
+                                        <div><label style={{...lbl,color:C.danger,fontWeight:"bold"}}>舊機最終錶號（彩色）</label><input style={inp({border:"2px solid "+C.danger,background:"#FFF8F8"})} value={m.colCur||""} onChange={e=>updMachine(m.id,"colCur",e.target.value)} placeholder="舊機拆除前錶號"/></div>
+                                        <div><label style={lbl}>上期錶號（舊機）</label><input style={inp({background:"#F5F5F5"})} value={m.colPrev||""} onChange={e=>updMachine(m.id,"colPrev",e.target.value)} placeholder="0"/></div>
+                                      </div>
+                                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,padding:8,background:"#F0FFF4",borderRadius:4,border:"1px dashed "+C.success}}>
+                                        <div style={{gridColumn:"span 2",fontSize:11,fontWeight:"bold",color:C.success,marginBottom:2}}>🆕 新機</div>
+                                        <div><label style={{...lbl,color:C.muted}}>新機安裝初始錶號（彩色）</label><input style={inp({background:"#F5F5F5"})} value={m.colNewInit||""} onChange={e=>updMachine(m.id,"colNewInit",e.target.value)} placeholder="安裝當下錶號（如 0）"/></div>
+                                        <div><label style={{...lbl,color:C.success,fontWeight:"bold"}}>🔵 新機本期錶號（彩色）</label><input style={inp({border:"2px solid "+C.success,background:"#F0FFF4"})} value={m.colNewCur||""} onChange={e=>updMachine(m.id,"colNewCur",e.target.value)} placeholder="本次抄表數字"/></div>
+                                      </div>
+                                    </div>
+                                  ) : (
                                   <div style={{display:"grid",gridTemplateColumns: f.multiCalcMode==="separate" ? "1fr 1fr 1fr 1fr 1fr" : "1fr 1fr 1fr 1fr",gap:8}}>
                                     <div><label style={{...lbl,color:C.navy,fontWeight:"bold"}}>本期🔵</label><input style={inp({border:"2px solid "+C.navy})} value={m.colCur||""} onChange={e=>updMachine(m.id,"colCur",e.target.value)}/></div>
                                     <div><label style={lbl}>上期</label><input style={inp({background:"#F5F5F5"})} value={m.colPrev||""} onChange={e=>updMachine(m.id,"colPrev",e.target.value)}/></div>
@@ -644,6 +821,7 @@
                                     <div><label style={lbl}>扣除張數</label><input style={inp()} value={m.colDeduct||""} onChange={e=>updMachine(m.id,"colDeduct",e.target.value)}/></div>
                                     <div style={{gridColumn: f.multiCalcMode==="separate"?"span 5":"span 4"}}><label style={lbl}>扣除備註</label><input style={inp()} value={m.colDeductNote||""} onChange={e=>updMachine(m.id,"colDeductNote",e.target.value)} placeholder="可填寫扣除原因"/></div>
                                   </div>
+                                  )}
                                 </div>
                               )}
                             </div>
@@ -932,7 +1110,9 @@
               <div style={{background:C.navy,padding:"16px 20px",display:"flex",alignItems:"center",gap:16}}>
                 <button onClick={()=>setPage("home")} style={{background:"none",border:"none",color:"#FFF",cursor:"pointer",fontSize:18}}>←</button>
                 <div><div style={{fontSize:11,letterSpacing:4,color:C.accent}}>HISTORY</div><div style={{color:"#FFF",fontSize:18,fontWeight:"bold"}}>歷史查詢</div></div>
+                <button onClick={()=>load()} style={{marginLeft:"auto",background:"none",border:"1px solid rgba(255,255,255,.5)",color:"#FFF",borderRadius:4,padding:"4px 12px",cursor:"pointer",fontSize:12,fontFamily:"'新細明體', 'PMingLiU', serif"}}>🔄 重新整理</button>
               </div>
+              {loadError && <div style={{background:"#FFF0F0",borderBottom:"2px solid "+C.danger,padding:"8px 16px",fontSize:12,color:C.danger,fontWeight:"bold"}}>⚠️ 載入失敗：{loadError} <button onClick={()=>load()} style={{marginLeft:12,padding:"2px 10px",background:C.danger,color:"#FFF",border:"none",borderRadius:3,cursor:"pointer",fontSize:11,fontFamily:"'新細明體', 'PMingLiU', serif"}}>重試</button></div>}
               <div style={{padding:"16px",maxWidth:720,margin:"0 auto"}}>
                 
                 <div style={{background:"#FFF",borderRadius:6,padding:16,marginBottom:16,display:"flex",gap:10,flexWrap:"wrap"}}>
@@ -1031,7 +1211,49 @@
                             {headers.map(h=><th key={h} style={{padding:"10px 7px",color:"#000",fontSize:12,textAlign:h==="項目"?"left":"right",fontWeight:"bold"}}>{h}</th>)}
                         </tr></thead>
                         <tbody>
-                            {rows.map(({lb,d}, i)=>(
+                            {rows.map(({lb,d}, i)=>{
+                              if(d.machineSwapped) {
+                                // 換機：拆成舊機＋新機兩行，再一行合計
+                                const colSpanAll = showMachineFee ? 10 : 7;
+                                return (
+                                  <React.Fragment key={lb}>
+                                    <tr><td colSpan={colSpanAll} style={{padding:"4px 7px",fontSize:10,fontWeight:"bold",color:"#888",background:"#FAFAFA",borderBottom:"1px solid #EEE"}}>　{lb}（換機結算期）</td></tr>
+                                    <tr>
+                                      <td style={{padding:"8px 7px 4px 16px",color:"#555",fontSize:11,fontWeight:"bold",borderBottom:"none"}}>↳ 舊機</td>
+                                      <td style={{padding:"8px 7px 4px",textAlign:"right",fontSize:11,color:"#555",borderBottom:"none"}}>{Number(d.current||0).toLocaleString()}</td>
+                                      <td style={{padding:"8px 7px 4px",textAlign:"right",fontSize:11,color:"#555",borderBottom:"none"}}>{Number(d.prev||0).toLocaleString()}</td>
+                                      <td style={{padding:"8px 7px 4px",textAlign:"right",fontSize:11,color:"#555",borderBottom:"none"}}>{Number(d.oldRaw||0).toLocaleString()}</td>
+                                      <td style={{padding:"8px 7px 4px",textAlign:"right",fontSize:11,color:"#999",borderBottom:"none"}}>—</td>
+                                      <td style={{padding:"8px 7px 4px",textAlign:"right",fontSize:11,color:"#555",borderBottom:"none"}}>{Number(d.oldRaw||0).toLocaleString()}</td>
+                                      <td style={{padding:"8px 7px 4px",textAlign:"right",fontSize:11,color:"#999",borderBottom:"none"}}>—</td>
+                                      {showMachineFee && <><td style={{borderBottom:"none"}}/><td style={{borderBottom:"none"}}/><td style={{borderBottom:"none"}}/></>}
+                                    </tr>
+                                    <tr>
+                                      <td style={{padding:"4px 7px 8px 16px",color:"#1E6B45",fontSize:11,fontWeight:"bold",borderBottom:"1px dashed #CCC"}}>↳ 新機</td>
+                                      <td style={{padding:"4px 7px 8px",textAlign:"right",fontSize:11,color:"#1E6B45",borderBottom:"1px dashed #CCC"}}>{Number(d.newMachineCur||0).toLocaleString()}</td>
+                                      <td style={{padding:"4px 7px 8px",textAlign:"right",fontSize:11,color:"#1E6B45",borderBottom:"1px dashed #CCC"}}>{Number(d.newMachineInit||0).toLocaleString()}</td>
+                                      <td style={{padding:"4px 7px 8px",textAlign:"right",fontSize:11,color:"#1E6B45",borderBottom:"1px dashed #CCC"}}>{Number(d.newRaw||0).toLocaleString()}</td>
+                                      <td style={{padding:"4px 7px 8px",textAlign:"right",fontSize:11,color:"#999",borderBottom:"1px dashed #CCC"}}>—</td>
+                                      <td style={{padding:"4px 7px 8px",textAlign:"right",fontSize:11,color:"#1E6B45",borderBottom:"1px dashed #CCC"}}>{Number(d.newRaw||0).toLocaleString()}</td>
+                                      <td style={{padding:"4px 7px 8px",textAlign:"right",fontSize:11,color:"#999",borderBottom:"1px dashed #CCC"}}>—</td>
+                                      {showMachineFee && <><td style={{borderBottom:"1px dashed #CCC"}}/><td style={{borderBottom:"1px dashed #CCC"}}/><td style={{borderBottom:"1px dashed #CCC"}}/></>}
+                                    </tr>
+                                    <tr>
+                                      <td style={{padding:"8px 7px",fontWeight:"bold",color:"#000",borderBottom:"2px solid #BBB",background:"#F8F8F8"}}>　{lb}（合計）</td>
+                                      <td style={{padding:"8px 7px",textAlign:"right",color:"#888",fontSize:11,borderBottom:"2px solid #BBB",background:"#F8F8F8"}}>—</td>
+                                      <td style={{padding:"8px 7px",textAlign:"right",color:"#888",fontSize:11,borderBottom:"2px solid #BBB",background:"#F8F8F8"}}>—</td>
+                                      <td style={{padding:"8px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"2px solid #BBB",background:"#F8F8F8"}}>{Number(d.raw||0).toLocaleString()}</td>
+                                      <td style={{padding:"8px 7px",textAlign:"right",fontWeight:"bold",color:(Number(d.deduct)||0)>0?"#000":"#999",borderBottom:"2px solid #BBB",background:"#F8F8F8"}}>{(Number(d.deduct)||0)>0?"-"+Number(d.deduct).toLocaleString():"—"}</td>
+                                      <td style={{padding:"8px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"2px solid #BBB",background:"#F8F8F8"}}>{Number(d.actual||0).toLocaleString()}</td>
+                                      <td style={{padding:"8px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"2px solid #BBB",background:"#F8F8F8"}}>{Number(d.quota||0).toLocaleString()}</td>
+                                      {showMachineFee && <td style={{padding:"8px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"2px solid #BBB",background:"#F8F8F8"}}>{Number(d.over||0).toLocaleString()}</td>}
+                                      {showMachineFee && <td style={{padding:"8px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"2px solid #BBB",background:"#F8F8F8"}}>${d.price}</td>}
+                                      {showMachineFee && <td style={{padding:"8px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"2px solid #BBB",background:"#F8F8F8"}}>{(d.fee||0)>0?"$"+Math.round(Number(d.fee)).toLocaleString():"未超印"}</td>}
+                                    </tr>
+                                  </React.Fragment>
+                                );
+                              }
+                              return (
                               <tr key={lb}>
                                  <td style={{padding:"10px 7px",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{lb}</td>
                                  <td style={{padding:"10px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{Number(d.current||0).toLocaleString()}</td>
@@ -1044,7 +1266,8 @@
                                  {showMachineFee && <td style={{padding:"10px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>${d.price}</td>}
                                  {showMachineFee && <td style={{padding:"10px 7px",textAlign:"right",fontWeight:"bold",color:"#000",borderBottom:"1px dashed #CCC"}}>{(d.fee||0)>0?"$"+Math.round(Number(d.fee)).toLocaleString():"未超印"}</td>}
                               </tr>
-                            ))}
+                              );
+                            })}
                         </tbody>
                       </table>
                       {hasD&&<div style={{border:"1px solid #000",borderRadius:4,padding:"8px 14px",fontSize:11,color:"#000",fontWeight:"bold"}}>🔧 維修扣除：{(Number(d_bw.deduct)||0)>0&&<span style={{marginLeft:8}}>黑白 -{Number(d_bw.deduct).toLocaleString()} 張{d_bw.note?" （"+d_bw.note+"）":""}</span>}{(Number(d_col.deduct)||0)>0&&<span style={{marginLeft:8}}>彩色 -{Number(d_col.deduct).toLocaleString()} 張{d_col.note?" （"+d_col.note+"）":""}</span>}</div>}
