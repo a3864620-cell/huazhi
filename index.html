@@ -87,7 +87,7 @@
         const emptyMachine = () => ({ id: Date.now()+Math.random(), type: "color", model: "", baseRent: "", rentNote: "", bwCur: "", bwPrev: "", bwQuota: "", bwPrice:"0.35", bwDeduct: "", bwDeductNote: "", colCur: "", colPrev: "", colQuota: "", colPrice:"3.5", colDeduct: "", colDeductNote: "", machineSwapped:false, bwNewInit:"", bwNewCur:"", colNewInit:"", colNewCur:"" });
 
         function emptyForm(){
-          return { clientId:"", clientName:"", taxMode:"未稅", overageTaxMode:"未稅", billingYear:String(CY), billingMonth:String(now.getMonth()+1), billingCycle:"1", periodStart:"", periodEnd:"", baseRent:"", rentNote:"", mode:"single", machineType:"color", multiCalcMode:"pooled", model:"", bwPrev:"", bwCur:"", bwQuota:"", bwPrice:"0.35", bwDeduct:"", bwDeductNote:"", colPrev:"", colCur:"", colQuota:"", colPrice:"3.5", colDeduct:"", colDeductNote:"", mBwPrice:"0.35", mColPrice:"3.5", machines:[emptyMachine()], machineSwapped:false, bwNewInit:"", bwNewCur:"", colNewInit:"", colNewCur:"" };
+          return { clientId:"", clientName:"", taxMode:"未稅", overageTaxMode:"未稅", billingYear:String(CY), billingMonth:String(now.getMonth()+1), billingCycle:"1", rentCycle:"", bw2colConvert:false, bw2colRatio:"10", bw2colMultiMode:"perMachine", periodStart:"", periodEnd:"", baseRent:"", rentNote:"", mode:"single", machineType:"color", multiCalcMode:"pooled", model:"", bwPrev:"", bwCur:"", bwQuota:"", bwPrice:"0.35", bwDeduct:"", bwDeductNote:"", colPrev:"", colCur:"", colQuota:"", colPrice:"3.5", colDeduct:"", colDeductNote:"", mBwPrice:"0.35", mColPrice:"3.5", machines:[emptyMachine()], machineSwapped:false, bwNewInit:"", bwNewCur:"", colNewInit:"", colNewCur:"" };
         }
 
         async function api(action, body={}) {
@@ -149,7 +149,7 @@
               const parsedClients = (Array.isArray(cs)?cs:[]).map(c => {
                   let msRaw = safeParse(c.machines, []);
                   let ms = Array.isArray(msRaw) ? [...msRaw] : [];
-                  let sets = { taxMode: "未稅", overageTaxMode: "未稅", billingCycle: "1", machineType: "color", multiCalcMode: "pooled" };
+                  let sets = { taxMode: "未稅", overageTaxMode: "未稅", billingCycle: "1", rentCycle: "", bw2colConvert: false, bw2colRatio: "10", bw2colMultiMode: "perMachine", machineType: "color", multiCalcMode: "pooled" };
                   
                   const backpacks = ms.filter(x => x && x._isSettings);
                   if (backpacks.length > 0) {
@@ -216,7 +216,8 @@
               const patch = { 
                 clientId:client.id, clientName:client.name, mode:client.mode||"single", model:client.model||"", 
                 taxMode: client.taxMode||"未稅", overageTaxMode: client.overageTaxMode||client.taxMode||"未稅", 
-                billingCycle: client.billingCycle||"1", 
+                billingCycle: client.billingCycle||"1", rentCycle: client.rentCycle||"", 
+                bw2colConvert: !!client.bw2colConvert, bw2colRatio: String(client.bw2colRatio||"10"), bw2colMultiMode: client.bw2colMultiMode||"perMachine", 
                 machineType: client.machineType||"color", multiCalcMode: client.multiCalcMode||"pooled",
                 bwQuota:String(client.bwQuota||""), bwPrice:String(client.bwPrice||"0.35"), colQuota:String(client.colQuota||""), colPrice:String(client.colPrice||"3.5"), 
                 baseRent:String(client.baseRent||""), rentNote:client.rentNote||"", bwCur:"", colCur:"", bwDeduct:"", bwDeductNote:"", colDeduct:"", colDeductNote:"",
@@ -259,6 +260,10 @@
                 taxMode: form.taxMode || "未稅",
                 overageTaxMode: form.overageTaxMode || "未稅",
                 billingCycle: form.billingCycle || "1",
+                rentCycle: form.rentCycle || "",
+                bw2colConvert: !!form.bw2colConvert,
+                bw2colRatio: form.bw2colRatio || "10",
+                bw2colMultiMode: form.bw2colMultiMode || "perMachine",
                 machineType: form.machineType || "color",
                 multiCalcMode: form.multiCalcMode || "pooled"
             }];
@@ -276,6 +281,7 @@
           function buildRecord(clientId){
             const isSingle = f.mode==="single";
             const cycle = Number(f.billingCycle) || 1;
+            const rentCycle = Number(f.rentCycle) || cycle; // 租金週期：空白時跟隨結算週期
             let totalRent = 0, totalOverage = 0;
             
             // 換機模式：總印量 = 舊機印量 + 新機印量
@@ -292,11 +298,19 @@
             const colRawTotal = colCalcBase.raw + colNewExtra;
             const colActualTotal = Math.max(0, colRawTotal - (Number(f.colDeduct)||0));
             const colQuotaTotal = (Number(f.colQuota)||0)*cycle;
-            const colOverTotal = Math.max(0, colActualTotal - colQuotaTotal);
-            const col = f.machineType === "bw" ? {raw:0, actual:0, over:0, fee:0, current:"", prev:"", quota:"", price:"", deduct:0} : { ...colCalcBase, raw: colRawTotal, actual: colActualTotal, over: colOverTotal, fee: Math.round(colOverTotal*(Number(f.colPrice)||0)) };
+            // 黑白剩餘額度換算彩色額度（例：黑白剩 3000 ÷ 10 = 彩色 +300 張）
+            const convOn = !!f.bw2colConvert && f.machineType !== "bw";
+            const convRatio = Number(f.bw2colRatio) || 10;
+            const bwLeftover = Math.max(0, bwQuotaTotal - bwActualTotal);
+            const colBonus = convOn ? Math.floor(bwLeftover / convRatio) : 0;
+            const colQuotaEff = colQuotaTotal + colBonus;
+            const colOverTotal = Math.max(0, colActualTotal - colQuotaEff);
+            const col = f.machineType === "bw" ? {raw:0, actual:0, over:0, fee:0, current:"", prev:"", quota:"", price:"", deduct:0} : { ...colCalcBase, raw: colRawTotal, actual: colActualTotal, over: colOverTotal, fee: Math.round(colOverTotal*(Number(f.colPrice)||0)), quota: colQuotaEff, quotaBase: colQuotaTotal, bwConvertBonus: colBonus, bwLeftoverUsed: colBonus*convRatio, convRatio: convOn?convRatio:0 };
             
             let tBwRaw=0, tBwQuota=0, tBwDeduct=0, tBwOver=0, tBwFee=0;
             let tColRaw=0, tColQuota=0, tColDeduct=0, tColOver=0, tColFee=0;
+            let tBwLeftover=0, tColBonus=0, multiColBonusForQuota=0; // 多台換算彩色用
+            const convMethod = f.bw2colMultiMode || "perMachine"; // perMachine 各台各自換 / pooled 全部併起來換
 
             const ms = f.machines.map(m => {
                const mBwOldRaw = Math.max(0,(Number(m.bwCur)||0)-(Number(m.bwPrev)||0));
@@ -309,8 +323,15 @@
                const mBwActual = Math.max(0, mBwRaw - (Number(m.bwDeduct)||0));
                const mColActual = Math.max(0, mColRaw - (Number(m.colDeduct)||0));
                
-               const mBwOverCalc = Math.max(0, mBwActual - ((Number(m.bwQuota)||0)*cycle));
-               const mColOverCalc = Math.max(0, mColActual - ((Number(m.colQuota)||0)*cycle));
+               const mBwQuotaT = (Number(m.bwQuota)||0)*cycle;
+               const mColQuotaBase = (Number(m.colQuota)||0)*cycle;
+               const mBwOverCalc = Math.max(0, mBwActual - mBwQuotaT);
+               const mBwLeftover = Math.max(0, mBwQuotaT - mBwActual);
+               // 各台各自換：本台黑白剩餘 → 本台彩色額度
+               const mColBonus = (f.bw2colConvert && convMethod==="perMachine" && m.type!=="bw") ? Math.floor(mBwLeftover / convRatio) : 0;
+               const mColQuotaEff = mColQuotaBase + mColBonus;
+               const mColOverCalc = Math.max(0, mColActual - mColQuotaEff);
+               tBwLeftover += mBwLeftover; tColBonus += mColBonus;
                
                const currentBwPrice = f.multiCalcMode === "separate" ? (Number(m.bwPrice)||0) : (Number(f.mBwPrice)||0);
                const currentColPrice = f.multiCalcMode === "separate" ? (Number(m.colPrice)||0) : (Number(f.mColPrice)||0);
@@ -332,7 +353,7 @@
                       newInit: m.bwNewCur
                     } : {})
                   },
-                  col: { current:m.colCur, prev:m.colPrev, raw:mColRaw, actual:mColActual, quota:(Number(m.colQuota)||0)*cycle, deduct:m.colDeduct, note:m.colDeductNote, over:mColOverCalc, price:currentColPrice, fee:mColFeeCalc,
+                  col: { current:m.colCur, prev:m.colPrev, raw:mColRaw, actual:mColActual, quota:mColQuotaEff, quotaBase:mColQuotaBase, bwConvertBonus:mColBonus, bwLeftoverUsed:mColBonus*convRatio, convRatio:(mColBonus>0?convRatio:0), deduct:m.colDeduct, note:m.colDeductNote, over:mColOverCalc, price:currentColPrice, fee:mColFeeCalc,
                     ...(m.machineSwapped ? {
                       machineSwapped:true,
                       oldRaw: mColOldRaw,
@@ -346,11 +367,32 @@
             });
 
             if (isSingle) {
-               totalRent = (Number(f.baseRent) || 0) * cycle;
+               totalRent = (Number(f.baseRent) || 0) * rentCycle;
                totalOverage = bw.fee + col.fee;
             } else {
+               // 多台：黑白剩餘換算彩色的加成總量
+               const convPoolBonus = f.bw2colConvert ? (convMethod==="pooled" ? Math.floor(tBwLeftover/convRatio) : tColBonus) : 0;
+
+               // 各台獨立計費 + 全部併起來換：把合併加成依機台順序折抵各台彩色超印
+               if (f.multiCalcMode === "separate" && f.bw2colConvert && convMethod === "pooled") {
+                  let remain = convPoolBonus;
+                  ms.forEach(m => {
+                     if (remain <= 0 || m.type === "bw") return;
+                     const use = Math.min(remain, m.col.over);
+                     if (use > 0) {
+                        m.col.over -= use;
+                        m.col.quota = (Number(m.col.quota)||0) + use;
+                        m.col.bwConvertBonus = (Number(m.col.bwConvertBonus)||0) + use;
+                        m.col.bwLeftoverUsed = (Number(m.col.bwLeftoverUsed)||0) + use*convRatio;
+                        m.col.convRatio = convRatio;
+                        m.col.fee = Math.round(m.col.over * (Number(m.col.price)||0));
+                        remain -= use;
+                     }
+                  });
+               }
+
                ms.forEach(m => { 
-                  totalRent += (Number(m.baseRent)||0) * cycle; 
+                  totalRent += (Number(m.baseRent)||0) * rentCycle; 
                   if (f.multiCalcMode === "separate") {
                      tBwOver += m.bw.over; tColOver += m.col.over;
                      tBwFee += m.bw.fee; tColFee += m.col.fee;
@@ -363,7 +405,8 @@
                   tBwFee = Math.round(tBwOver * (Number(f.mBwPrice)||0));
 
                   const poolColActual = Math.max(0, tColRaw - tColDeduct);
-                  tColOver = Math.max(0, poolColActual - tColQuota);
+                  multiColBonusForQuota = convPoolBonus; // 併入合併彩色總額度
+                  tColOver = Math.max(0, poolColActual - (tColQuota + multiColBonusForQuota));
                   tColFee = Math.round(tColOver * (Number(f.mColPrice)||0));
                }
                
@@ -378,7 +421,7 @@
             const finalTotal = subtotal + taxAmount;
 
             return {
-               id:Date.now(), clientId, mode:f.mode, clientName:f.clientName, billingYear:f.billingYear, billingMonth:f.billingMonth, billingCycle:cycle, periodStart:f.periodStart, periodEnd:f.periodEnd,
+               id:Date.now(), clientId, mode:f.mode, clientName:f.clientName, billingYear:f.billingYear, billingMonth:f.billingMonth, billingCycle:cycle, rentCycle:rentCycle, bw2colConvert:convOn, bw2colRatio:convRatio, periodStart:f.periodStart, periodEnd:f.periodEnd,
                taxMode:f.taxMode, overageTaxMode:f.overageTaxMode, machineType:f.machineType, multiCalcMode:f.multiCalcMode,
                baseRent:totalRent, rentNote:isSingle?f.rentNote:"", model:f.model,
                bw:{current:f.bwCur,prev:f.bwPrev,quota:(Number(f.bwQuota)||0)*cycle,price:f.bwPrice,deduct:f.bwDeduct,note:f.bwDeductNote,...bw,
@@ -403,7 +446,10 @@
                totalBwRaw: isSingle ? bw.raw : tBwRaw, 
                totalColRaw: isSingle ? col.raw : tColRaw,
                bwQuota: isSingle ? (Number(f.bwQuota)||0)*cycle : tBwQuota,
-               colQuota: isSingle ? (Number(f.colQuota)||0)*cycle : tColQuota,
+               colQuota: isSingle ? (Number(f.colQuota)||0)*cycle : (tColQuota + multiColBonusForQuota),
+               multiColConvBonus: (!isSingle && f.bw2colConvert) ? (convMethod==="pooled" ? Math.floor(tBwLeftover/convRatio) : tColBonus) : 0,
+               multiBwLeftover: isSingle ? 0 : tBwLeftover,
+               bw2colMultiMode: convMethod,
                bwDeduct: isSingle ? f.bwDeduct : tBwDeduct,
                colDeduct: isSingle ? f.colDeduct : tColDeduct,
                bwActual: isSingle ? bw.actual : Math.max(0, tBwRaw - tBwDeduct),
@@ -422,6 +468,7 @@
           // 將已存記錄轉回表單格式（供編輯用）
           function editRecordToForm(r) {
             const cycle = Number(r.billingCycle) || 1;
+            const rentCycle = Number(r.rentCycle) || cycle; // 還原租金月數時用租金週期
             const isSingle = r.mode === "single";
             return {
               clientId: r.clientId || "",
@@ -431,9 +478,13 @@
               billingYear: String(r.billingYear || ""),
               billingMonth: String(r.billingMonth || ""),
               billingCycle: String(r.billingCycle || "1"),
+              rentCycle: String(r.rentCycle || ""),
+              bw2colConvert: !!r.bw2colConvert,
+              bw2colRatio: String(r.bw2colRatio || "10"),
+              bw2colMultiMode: r.bw2colMultiMode || "perMachine",
               periodStart: fixDate(r.periodStart || ""),
               periodEnd: fixDate(r.periodEnd || ""),
-              baseRent: isSingle ? String(Math.round((Number(r.baseRent)||0) / cycle)) : "",
+              baseRent: isSingle ? String(Math.round((Number(r.baseRent)||0) / rentCycle)) : "",
               rentNote: r.rentNote || "",
               machineSwapped: false, bwNewInit: "", colNewInit: "",
               mode: r.mode || "single",
@@ -605,7 +656,7 @@
                         <div><label style={lbl}>結算月份</label><select style={inp()} value={f.billingMonth} onChange={e=>upd({billingMonth:e.target.value})}>{MONTHS.map((m,i)=><option key={i} value={String(i+1)}>{m}</option>)}</select></div>
                       </div>
                       <div style={{marginBottom:12}}>
-                        <label style={{...lbl, fontWeight:"bold", color:C.danger}}>計費週期（幾個月結一次帳）</label>
+                        <label style={{...lbl, fontWeight:"bold", color:C.danger}}>結算週期（幾個月結一次帳・超印額度依此計算）</label>
                         <select style={inp({border:"2px solid "+C.danger})} value={f.billingCycle} onChange={e=>upd({billingCycle:e.target.value})}>
                           {[1,2,3,4,5,6,7,8,9,10,11,12].map(n=>{
                             const tag=n===1?" (月繳)":n===3?" (季繳)":n===6?" (半年繳)":n===12?" (年繳)":"";
@@ -624,6 +675,21 @@
                             months.push(`${y}年${m}月`);
                           }
                           return <div style={{marginTop:6,padding:"6px 10px",background:"#FFF7ED",border:"1px solid #F0C070",borderRadius:4,fontSize:12,color:"#7A5000",fontWeight:"bold"}}>📅 本期結算涵蓋：{months.join(" ＋ ")}</div>;
+                        })()}
+                      </div>
+                      <div style={{marginBottom:12}}>
+                        <label style={{...lbl, fontWeight:"bold", color:C.blue}}>租金週期（租金乘幾個月・空白＝同結算週期）</label>
+                        <select style={inp({border:"2px solid "+C.blue})} value={f.rentCycle} onChange={e=>upd({rentCycle:e.target.value})}>
+                          <option value="">與結算週期相同（預設）</option>
+                          {[1,2,3,4,5,6,7,8,9,10,11,12].map(n=>{
+                            const tag=n===1?" (月收)":n===3?" (季收)":n===6?" (半年收)":n===12?" (年收)":"";
+                            return <option key={n} value={String(n)}>{n} 個月{tag}</option>;
+                          })}
+                        </select>
+                        {(()=>{
+                          const rc=Number(f.rentCycle); const cyc=Number(f.billingCycle)||1;
+                          if(!rc || rc===cyc) return null;
+                          return <div style={{marginTop:6,padding:"6px 10px",background:C.blueBg,border:"1px solid "+C.blueBorder,borderRadius:4,fontSize:12,color:C.blue,fontWeight:"bold"}}>💡 此客戶租金按 {rc} 個月計、超印按 {cyc} 個月結（兩者分開）</div>;
                         })()}
                       </div>
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
@@ -656,11 +722,27 @@
                            <TogglePill options={[{label:"黑白機",val:"bw"},{label:"彩色機 (含黑白)",val:"color"}]} value={f.machineType} onChange={v=>upd({machineType:v})} />
                         </div>
 
+                        {f.machineType !== "bw" && (
+                          <div style={{background:"#F0FFF4",border:"1px solid "+C.success,borderRadius:4,padding:14,marginBottom:14}}>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:f.bw2colConvert?10:0}}>
+                              <div style={{fontSize:12,fontWeight:"bold",color:C.success}}>🔄 黑白剩餘額度換算彩色</div>
+                              <button onClick={()=>upd({bw2colConvert:!f.bw2colConvert})} style={{fontSize:11,padding:"4px 12px",borderRadius:4,border:"2px solid "+(f.bw2colConvert?C.success:C.muted),background:f.bw2colConvert?C.success:"#FFF",color:f.bw2colConvert?"#FFF":C.muted,cursor:"pointer",fontWeight:"bold",fontFamily:"'新細明體', 'PMingLiU', serif"}}>{f.bw2colConvert?"啟用中 ✓":"關閉"}</button>
+                            </div>
+                            {f.bw2colConvert && (
+                              <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:C.text,fontWeight:"bold"}}>
+                                <span>黑白</span>
+                                <input style={inp({width:70,padding:"6px 8px",border:"2px solid "+C.success,textAlign:"center"})} value={f.bw2colRatio} onChange={e=>upd({bw2colRatio:e.target.value})}/>
+                                <span>張 換 1 張彩色（黑白沒用完的額度，自動折抵彩色超印）</span>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
                         <div style={{background:C.blueBg,border:"1px solid "+C.blueBorder,borderRadius:4,padding:14,marginBottom:14}}>
                           <div style={{fontSize:11,letterSpacing:3,color:C.blue,marginBottom:10,fontWeight:"bold"}}>💰 基本租金（選填）</div>
                           <div style={{marginBottom:10}}><label style={lbl}>金額（元/單月）</label><input style={inp()} value={f.baseRent||""} onChange={e=>upd({baseRent:e.target.value})} placeholder="0"/></div>
                           <div><label style={{...lbl,color:C.blue}}>備註（可填繳費方式、說明等）</label><input style={inp()} value={f.rentNote||""} onChange={e=>upd({rentNote:e.target.value})} placeholder="例：季繳 / 月租金含影印紙"/></div>
-                          {Number(f.billingCycle) > 1 && <div style={{fontSize:11, color:C.blue, marginTop:6}}>* 系統將自動計算 {f.billingCycle} 個月的總金額：${(Number(f.baseRent)||0) * Number(f.billingCycle)}</div>}
+                          {(()=>{ const rc=Number(f.rentCycle)||Number(f.billingCycle)||1; return rc>1 && <div style={{fontSize:11, color:C.blue, marginTop:6}}>* 系統將自動計算 {rc} 個月的租金總額：${(Number(f.baseRent)||0) * rc}</div>; })()}
                         </div>
 
                         <div style={{marginBottom:14}}><label style={lbl}>機型 / 部門</label><input style={inp()} value={f.model||""} onChange={e=>upd({model:e.target.value})} placeholder="例：MPC3503"/></div>
@@ -732,6 +814,23 @@
                         <div style={{marginBottom:16}}>
                            <label style={{...lbl, fontWeight:"bold", color:C.navy}}>多台超印計算方式</label>
                            <TogglePill options={[{label:"各機台獨立計算 (各點不同單價)",val:"separate"},{label:"總額度合併計算 (全公司統一單價)",val:"pooled"}]} value={f.multiCalcMode} onChange={v=>upd({multiCalcMode:v})} />
+                        </div>
+
+                        <div style={{background:"#F0FFF4",border:"1px solid "+C.success,borderRadius:4,padding:14,marginBottom:16}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:f.bw2colConvert?12:0}}>
+                            <div style={{fontSize:12,fontWeight:"bold",color:C.success}}>🔄 黑白剩餘額度換算彩色</div>
+                            <button onClick={()=>upd({bw2colConvert:!f.bw2colConvert})} style={{fontSize:11,padding:"4px 12px",borderRadius:4,border:"2px solid "+(f.bw2colConvert?C.success:C.muted),background:f.bw2colConvert?C.success:"#FFF",color:f.bw2colConvert?"#FFF":C.muted,cursor:"pointer",fontWeight:"bold",fontFamily:"'新細明體', 'PMingLiU', serif"}}>{f.bw2colConvert?"啟用中 ✓":"關閉"}</button>
+                          </div>
+                          {f.bw2colConvert && (<>
+                            <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:C.text,fontWeight:"bold",marginBottom:10}}>
+                              <span>黑白</span>
+                              <input style={inp({width:70,padding:"6px 8px",border:"2px solid "+C.success,textAlign:"center"})} value={f.bw2colRatio} onChange={e=>upd({bw2colRatio:e.target.value})}/>
+                              <span>張 換 1 張彩色</span>
+                            </div>
+                            <label style={{...lbl,color:C.success,fontWeight:"bold"}}>換算方式</label>
+                            <TogglePill options={[{label:"各台各自換",val:"perMachine"},{label:"全部併起來換",val:"pooled"}]} value={f.bw2colMultiMode||"perMachine"} onChange={v=>upd({bw2colMultiMode:v})} />
+                            <div style={{fontSize:11,color:C.muted,marginTop:6}}>{(f.bw2colMultiMode||"perMachine")==="perMachine"?"每台自己的黑白剩餘，只換給自己的彩色":"全部機台黑白剩餘合計後，再一起換成彩色額度"}</div>
+                          </>)}
                         </div>
 
                         <div style={{background:C.blueBg,border:"1px solid "+C.blueBorder,borderRadius:4,padding:12,marginBottom:16}}>
@@ -834,29 +933,54 @@
                       let sumRent = 0, sumBwRaw = 0, sumBwQuota = 0, sumBwDeduct = 0, sumBwOver = 0, sumBwFee = 0;
                       let sumColRaw = 0, sumColQuota = 0, sumColDeduct = 0, sumColOver = 0, sumColFee = 0;
                       const cycle = Number(f.billingCycle) || 1;
+                      const rentCycle = Number(f.rentCycle) || cycle;
+                      const convOn = !!f.bw2colConvert && (f.mode!=="single" || f.machineType!=="bw");
+                      const convRatio = Number(f.bw2colRatio) || 10;
+                      let convBonus = 0, convLeftover = 0;
 
                       if (f.mode === "single") {
                         const sBw = calcFee(f.bwCur, f.bwPrev, f.bwQuota, f.bwPrice, f.bwDeduct, cycle);
-                        const sCol = f.machineType === "bw" ? {raw:0,over:0,fee:0} : calcFee(f.colCur, f.colPrev, f.colQuota, f.colPrice, f.colDeduct, cycle);
-                        sumRent = (Number(f.baseRent)||0) * cycle;
+                        const sCol = f.machineType === "bw" ? {raw:0,actual:0,over:0,fee:0} : calcFee(f.colCur, f.colPrev, f.colQuota, f.colPrice, f.colDeduct, cycle);
+                        sumRent = (Number(f.baseRent)||0) * rentCycle;
                         sumBwRaw = sBw.raw; sumBwQuota = (Number(f.bwQuota)||0)*cycle; sumBwDeduct = Number(f.bwDeduct)||0; sumBwOver = sBw.over; sumBwFee = sBw.fee;
-                        sumColRaw = sCol.raw; sumColQuota = (Number(f.colQuota)||0)*cycle; sumColDeduct = Number(f.colDeduct)||0; sumColOver = sCol.over; sumColFee = sCol.fee;
+                        sumColRaw = sCol.raw; sumColDeduct = Number(f.colDeduct)||0;
+                        const colQuotaBase = (Number(f.colQuota)||0)*cycle;
+                        convLeftover = (convOn && f.machineType!=="bw") ? Math.max(0, sumBwQuota - sBw.actual) : 0;
+                        convBonus = Math.floor(convLeftover / convRatio);
+                        sumColQuota = colQuotaBase + convBonus;
+                        sumColOver = f.machineType==="bw" ? 0 : Math.max(0, sCol.actual - sumColQuota);
+                        sumColFee = Math.round(sumColOver * (Number(f.colPrice)||0));
                       } else {
-                        f.machines.forEach(m => {
-                          sumRent += (Number(m.baseRent)||0) * cycle;
+                        const convMethod = f.bw2colMultiMode || "perMachine";
+                        let tBwLeftover = 0, tColBonus = 0;
+                        const mArr = f.machines.map(m => {
                           const mBwRaw = Math.max(0,(Number(m.bwCur)||0)-(Number(m.bwPrev)||0));
                           const mColRaw = m.type === "bw" ? 0 : Math.max(0,(Number(m.colCur)||0)-(Number(m.colPrev)||0));
-                          sumBwRaw += mBwRaw; sumBwQuota += (Number(m.bwQuota)||0)*cycle; sumBwDeduct += Number(m.bwDeduct)||0;
-                          sumColRaw += mColRaw; sumColQuota += (Number(m.colQuota)||0)*cycle; sumColDeduct += Number(m.colDeduct)||0;
-
-                          if (f.multiCalcMode === "separate") {
-                             const mBwOver = Math.max(0, Math.max(0, mBwRaw - (Number(m.bwDeduct)||0)) - ((Number(m.bwQuota)||0)*cycle));
-                             const mColOver = Math.max(0, Math.max(0, mColRaw - (Number(m.colDeduct)||0)) - ((Number(m.colQuota)||0)*cycle));
-                             sumBwOver += mBwOver; sumColOver += mColOver;
-                             sumBwFee += Math.round(mBwOver * (Number(m.bwPrice)||0)); 
-                             sumColFee += Math.round(mColOver * (Number(m.colPrice)||0)); 
-                          }
+                          const mBwActual = Math.max(0, mBwRaw - (Number(m.bwDeduct)||0));
+                          const mColActual = Math.max(0, mColRaw - (Number(m.colDeduct)||0));
+                          const mBwQuotaT = (Number(m.bwQuota)||0)*cycle;
+                          const mColQuotaBase = (Number(m.colQuota)||0)*cycle;
+                          const mBwLeftover = Math.max(0, mBwQuotaT - mBwActual);
+                          const mColBonus = (convOn && convMethod==="perMachine" && m.type!=="bw") ? Math.floor(mBwLeftover/convRatio) : 0;
+                          tBwLeftover += mBwLeftover; tColBonus += mColBonus;
+                          sumRent += (Number(m.baseRent)||0) * rentCycle;
+                          sumBwRaw += mBwRaw; sumBwQuota += mBwQuotaT; sumBwDeduct += Number(m.bwDeduct)||0;
+                          sumColRaw += mColRaw; sumColQuota += mColQuotaBase; sumColDeduct += Number(m.colDeduct)||0;
+                          return { m, mBwOver: Math.max(0, mBwActual - mBwQuotaT), mColOver: Math.max(0, mColActual - (mColQuotaBase + mColBonus)) };
                         });
+                        const convPoolBonus = convOn ? (convMethod==="pooled" ? Math.floor(tBwLeftover/convRatio) : tColBonus) : 0;
+                        convLeftover = tBwLeftover; convBonus = convPoolBonus;
+
+                        if (f.multiCalcMode === "separate") {
+                          let remain = (convMethod==="pooled") ? convPoolBonus : 0;
+                          mArr.forEach(x => {
+                            let colOver = x.mColOver;
+                            if (remain>0 && x.m.type!=="bw") { const use=Math.min(remain,colOver); colOver-=use; remain-=use; }
+                            sumBwOver += x.mBwOver; sumColOver += colOver;
+                            sumBwFee += Math.round(x.mBwOver * (Number(x.m.bwPrice)||0));
+                            sumColFee += Math.round(colOver * (Number(x.m.colPrice)||0));
+                          });
+                        }
 
                         if (f.multiCalcMode === "pooled") {
                           const bAct = Math.max(0, sumBwRaw - sumBwDeduct);
@@ -864,7 +988,7 @@
                           sumBwFee = Math.round(sumBwOver * (Number(f.mBwPrice)||0));
 
                           const poolColActual = Math.max(0, sumColRaw - sumColDeduct);
-                          sumColOver = Math.max(0, poolColActual - sumColQuota);
+                          sumColOver = Math.max(0, poolColActual - (sumColQuota + convPoolBonus));
                           sumColFee = Math.round(sumColOver * (Number(f.mColPrice)||0));
                         }
                       }
@@ -885,8 +1009,15 @@
                             
                             {sumRent > 0 && (
                               <div style={{display:"flex", justifyContent:"space-between", fontSize:13, color:C.text, marginBottom:8, fontWeight:"bold"}}>
-                                <span>基本月租金{f.mode==="multi"?" (各機台總和)":""} (${(sumRent/cycle).toLocaleString()} x {cycle}個月)</span>
+                                <span>基本月租金{f.mode==="multi"?" (各機台總和)":""} (${(sumRent/rentCycle).toLocaleString()} x {rentCycle}個月)</span>
                                 <span>${Math.round(sumRent).toLocaleString()}</span>
+                              </div>
+                            )}
+
+                            {convBonus > 0 && (
+                              <div style={{display:"flex", justifyContent:"space-between", fontSize:12, color:C.success, marginBottom:8, fontWeight:"bold", background:"#F0FFF4", border:"1px dashed "+C.success, borderRadius:4, padding:"6px 10px"}}>
+                                <span>🔄 黑白剩餘 {convLeftover.toLocaleString()} 張 ÷ {convRatio} = 彩色 +{convBonus.toLocaleString()} 張額度</span>
+                                <span>已折抵彩色</span>
                               </div>
                             )}
 
@@ -948,7 +1079,10 @@
                   taxMode: ec.taxMode || "未稅",
                   overageTaxMode: ec.overageTaxMode || "未稅",
                   billingCycle: ec.billingCycle || "1",
-                  machineType: ec.machineType || "color",
+                  rentCycle: ec.rentCycle || "",
+                  bw2colConvert: !!ec.bw2colConvert,
+                  bw2colRatio: ec.bw2colRatio || "10",
+                  bw2colMultiMode: ec.bw2colMultiMode || "perMachine",
                   multiCalcMode: ec.multiCalcMode || "pooled"
               }];
 
@@ -987,8 +1121,16 @@
                     </div>
                     
                     <div style={{marginBottom:16}}>
-                       <label style={{...lbl, fontWeight:"bold", color:C.danger}}>預設結帳週期 (月數)</label>
+                       <label style={{...lbl, fontWeight:"bold", color:C.danger}}>預設結算週期 (超印依此計算・月數)</label>
                        <select style={inp({border:"2px solid "+C.danger})} value={ec.billingCycle||"1"} onChange={e=>updEc({billingCycle:e.target.value})}>
+                          {[1,2,3,4,5,6,7,8,9,10,11,12].map(n=><option key={n} value={String(n)}>{n} 個月</option>)}
+                       </select>
+                    </div>
+
+                    <div style={{marginBottom:16}}>
+                       <label style={{...lbl, fontWeight:"bold", color:C.blue}}>租金週期 (租金乘幾個月・空白＝同結算)</label>
+                       <select style={inp({border:"2px solid "+C.blue})} value={ec.rentCycle||""} onChange={e=>updEc({rentCycle:e.target.value})}>
+                          <option value="">與結算週期相同（預設）</option>
                           {[1,2,3,4,5,6,7,8,9,10,11,12].map(n=><option key={n} value={String(n)}>{n} 個月</option>)}
                        </select>
                     </div>
@@ -1003,6 +1145,21 @@
                            <label style={{...lbl, fontWeight:"bold", color:C.navy}}>機型種類</label>
                            <TogglePill options={[{label:"黑白機",val:"bw"},{label:"彩色機 (含黑白)",val:"color"}]} value={ec.machineType||"color"} onChange={v=>updEc({machineType:v})} />
                         </div>
+                        {(ec.machineType||"color") !== "bw" && (
+                          <div style={{background:"#F0FFF4",border:"1px solid "+C.success,borderRadius:4,padding:12,marginBottom:14}}>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:ec.bw2colConvert?10:0}}>
+                              <div style={{fontSize:12,fontWeight:"bold",color:C.success}}>🔄 黑白剩餘額度換算彩色</div>
+                              <button onClick={()=>updEc({bw2colConvert:!ec.bw2colConvert})} style={{fontSize:11,padding:"4px 12px",borderRadius:4,border:"2px solid "+(ec.bw2colConvert?C.success:C.muted),background:ec.bw2colConvert?C.success:"#FFF",color:ec.bw2colConvert?"#FFF":C.muted,cursor:"pointer",fontWeight:"bold",fontFamily:"'新細明體', 'PMingLiU', serif"}}>{ec.bw2colConvert?"啟用中 ✓":"關閉"}</button>
+                            </div>
+                            {ec.bw2colConvert && (
+                              <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:C.text,fontWeight:"bold"}}>
+                                <span>黑白</span>
+                                <input style={inp({width:70,padding:"6px 8px",border:"2px solid "+C.success,textAlign:"center"})} value={ec.bw2colRatio||"10"} onChange={e=>updEc({bw2colRatio:e.target.value})}/>
+                                <span>張 換 1 張彩色</span>
+                              </div>
+                            )}
+                          </div>
+                        )}
                         <div style={{marginBottom:14}}><label style={lbl}>機型</label><input style={inp()} value={ec.model||""} onChange={e=>updEc({model:e.target.value})} placeholder="例：MPC3503"/></div>
                         <div style={{display:"grid",gridTemplateColumns: ec.machineType==="bw"?"1fr 1fr":"1fr 1fr 1fr 1fr",gap:10,marginBottom:14}}>
                           <div><label style={lbl}>單月黑白額度</label><input style={inp()} value={ec.bwQuota||""} onChange={e=>updEc({bwQuota:e.target.value})} placeholder="0"/></div>
@@ -1029,6 +1186,22 @@
                         <div style={{marginBottom:16}}>
                            <label style={{...lbl, fontWeight:"bold", color:C.navy}}>多台超印計算方式</label>
                            <TogglePill options={[{label:"各機台獨立計算",val:"separate"},{label:"總額度合併計算",val:"pooled"}]} value={ec.multiCalcMode||"pooled"} onChange={v=>updEc({multiCalcMode:v})} />
+                        </div>
+
+                        <div style={{background:"#F0FFF4",border:"1px solid "+C.success,borderRadius:4,padding:12,marginBottom:16}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:ec.bw2colConvert?12:0}}>
+                            <div style={{fontSize:12,fontWeight:"bold",color:C.success}}>🔄 黑白剩餘額度換算彩色</div>
+                            <button onClick={()=>updEc({bw2colConvert:!ec.bw2colConvert})} style={{fontSize:11,padding:"4px 12px",borderRadius:4,border:"2px solid "+(ec.bw2colConvert?C.success:C.muted),background:ec.bw2colConvert?C.success:"#FFF",color:ec.bw2colConvert?"#FFF":C.muted,cursor:"pointer",fontWeight:"bold",fontFamily:"'新細明體', 'PMingLiU', serif"}}>{ec.bw2colConvert?"啟用中 ✓":"關閉"}</button>
+                          </div>
+                          {ec.bw2colConvert && (<>
+                            <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:C.text,fontWeight:"bold",marginBottom:10}}>
+                              <span>黑白</span>
+                              <input style={inp({width:70,padding:"6px 8px",border:"2px solid "+C.success,textAlign:"center"})} value={ec.bw2colRatio||"10"} onChange={e=>updEc({bw2colRatio:e.target.value})}/>
+                              <span>張 換 1 張彩色</span>
+                            </div>
+                            <label style={{...lbl,color:C.success,fontWeight:"bold"}}>換算方式</label>
+                            <TogglePill options={[{label:"各台各自換",val:"perMachine"},{label:"全部併起來換",val:"pooled"}]} value={ec.bw2colMultiMode||"perMachine"} onChange={v=>updEc({bw2colMultiMode:v})} />
+                          </>)}
                         </div>
                         {ec.multiCalcMode === "pooled" && (
                            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16,background:C.bg,padding:14,borderRadius:4}}>
@@ -1090,7 +1263,7 @@
                   {clients.map(c=>(
                     <div key={c.id} style={{background:"#FFF",borderRadius:6,padding:16,marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                       <div>
-                        <div style={{fontWeight:"bold",fontSize:16}}>{c.name} <span style={{fontSize:11, color:C.danger, fontWeight:"bold", marginLeft:6}}>[{c.billingCycle||1}個月結]</span></div>
+                        <div style={{fontWeight:"bold",fontSize:16}}>{c.name} <span style={{fontSize:11, color:C.danger, fontWeight:"bold", marginLeft:6}}>[{c.billingCycle||1}個月結]</span>{c.rentCycle && String(c.rentCycle)!==String(c.billingCycle||"1") && <span style={{fontSize:11, color:C.blue, fontWeight:"bold", marginLeft:4}}>[租金{c.rentCycle}個月]</span>}</div>
                         <div style={{fontSize:12,color:C.muted,marginTop:3}}>{c.mode==="single"?"單台":"多台"} ｜ 租金:{c.taxMode||"未稅"} / 超印:{c.overageTaxMode||c.taxMode||"未稅"} ｜ {c.machineType==="bw"?"黑白機":"彩色機"}</div>
                       </div>
                       <div style={{display:"flex",gap:8}}>
@@ -1171,7 +1344,7 @@
           );
 
           if(page==="preview"&&printData){
-            const r=printData,isSingle=r.mode==="single", cycle = r.billingCycle || 1;
+            const r=printData,isSingle=r.mode==="single", cycle = r.billingCycle || 1, rentCycle = r.rentCycle || cycle;
             
             let gRent = Number(r.baseRent)||0;
             let gOverage = (r.bwFee||0) + (r.colFee||0);
@@ -1270,6 +1443,7 @@
                             })}
                         </tbody>
                       </table>
+                      {Number(d_col.bwConvertBonus)>0 && <div style={{border:"1px solid #000",borderRadius:4,padding:"8px 14px",fontSize:11,color:"#000",fontWeight:"bold",marginTop:hasD?8:0}}>🔄 黑白剩餘額度換算彩色：黑白剩 {Number(d_col.bwLeftoverUsed||0).toLocaleString()} 張 ÷ {Number(d_col.convRatio||0)} = 彩色 +{Number(d_col.bwConvertBonus).toLocaleString()} 張（已併入彩色總額度折抵）</div>}
                       {hasD&&<div style={{border:"1px solid #000",borderRadius:4,padding:"8px 14px",fontSize:11,color:"#000",fontWeight:"bold"}}>🔧 維修扣除：{(Number(d_bw.deduct)||0)>0&&<span style={{marginLeft:8}}>黑白 -{Number(d_bw.deduct).toLocaleString()} 張{d_bw.note?" （"+d_bw.note+"）":""}</span>}{(Number(d_col.deduct)||0)>0&&<span style={{marginLeft:8}}>彩色 -{Number(d_col.deduct).toLocaleString()} 張{d_col.note?" （"+d_col.note+"）":""}</span>}</div>}
                   </div>
                );
@@ -1322,11 +1496,12 @@
                           </tr>
                         ))}</tbody>
                       </table>
+                      {Number(r.multiColConvBonus)>0 && <div style={{border:"1px solid #000",borderRadius:4,padding:"8px 14px",fontSize:11,color:"#000",fontWeight:"bold",marginBottom:14}}>🔄 黑白剩餘額度換算彩色（{r.bw2colMultiMode==="pooled"?"全部併計":"各台合計"}）：黑白剩 {Number(r.multiColConvBonus*(Number(r.bw2colRatio)||10)).toLocaleString()} 張 ÷ {Number(r.bw2colRatio)||10} = 彩色 +{Number(r.multiColConvBonus).toLocaleString()} 張（已併入彩色總額度）</div>}
                     </>)}
 
                     <div style={{borderTop:"3px solid #000",paddingTop:16,marginTop:20}}>
                       <div style={{display:"flex",justifyContent:"flex-end",gap:24,marginBottom:5,fontSize:13,color:"#000",fontWeight:"bold"}}>
-                          <span>週期租金總計 ({cycle}個月) {r.taxMode==="內含"?"(內含稅)":r.taxMode==="外加"?"(未稅)":""}</span>
+                          <span>週期租金總計 ({rentCycle}個月) {r.taxMode==="內含"?"(內含稅)":r.taxMode==="外加"?"(未稅)":""}</span>
                           <span style={{minWidth:90,textAlign:"right"}}>${Math.round(gRent).toLocaleString()}</span>
                       </div>
                       <div style={{display:"flex",justifyContent:"flex-end",gap:24,marginBottom:5,fontSize:13,color:"#000",fontWeight:"bold"}}>
