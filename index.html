@@ -149,7 +149,7 @@
               const parsedClients = (Array.isArray(cs)?cs:[]).map(c => {
                   let msRaw = safeParse(c.machines, []);
                   let ms = Array.isArray(msRaw) ? [...msRaw] : [];
-                  let sets = { taxMode: "未稅", overageTaxMode: "未稅", billingCycle: "1", rentCycle: "", bw2colConvert: false, bw2colRatio: "10", bw2colMultiMode: "perMachine", machineType: "color", multiCalcMode: "pooled" };
+                  let sets = { taxMode: "未稅", overageTaxMode: "未稅", billingCycle: "1", rentCycle: "", bw2colConvert: false, bw2colRatio: "10", bw2colMultiMode: "perMachine", machineType: "color", multiCalcMode: "pooled", memo: "" };
                   
                   const backpacks = ms.filter(x => x && x._isSettings);
                   if (backpacks.length > 0) {
@@ -220,7 +220,7 @@
                 bw2colConvert: !!client.bw2colConvert, bw2colRatio: String(client.bw2colRatio||"10"), bw2colMultiMode: client.bw2colMultiMode||"perMachine", 
                 machineType: client.machineType||"color", multiCalcMode: client.multiCalcMode||"pooled",
                 bwQuota:String(client.bwQuota||""), bwPrice:String(client.bwPrice||"0.35"), colQuota:String(client.colQuota||""), colPrice:String(client.colPrice||"3.5"), 
-                baseRent:String(client.baseRent||""), rentNote:client.rentNote||"", bwCur:"", colCur:"", bwDeduct:"", bwDeductNote:"", colDeduct:"", colDeductNote:"",
+                baseRent:String(client.baseRent||""), rentNote:client.memo||client.rentNote||"", bwCur:"", colCur:"", bwDeduct:"", bwDeductNote:"", colDeduct:"", colDeductNote:"",
                 mBwPrice:String(client.mBwPrice||"0.35"), mColPrice:String(client.mColPrice||"3.5")
               };
               
@@ -265,7 +265,8 @@
                 bw2colRatio: form.bw2colRatio || "10",
                 bw2colMultiMode: form.bw2colMultiMode || "perMachine",
                 machineType: form.machineType || "color",
-                multiCalcMode: form.multiCalcMode || "pooled"
+                multiCalcMode: form.multiCalcMode || "pooled",
+                memo: form.rentNote || existing?.memo || ""
             }];
 
             const profile={
@@ -423,7 +424,7 @@
             return {
                id:Date.now(), clientId, mode:f.mode, clientName:f.clientName, billingYear:f.billingYear, billingMonth:f.billingMonth, billingCycle:cycle, rentCycle:rentCycle, bw2colConvert:convOn, bw2colRatio:convRatio, periodStart:f.periodStart, periodEnd:f.periodEnd,
                taxMode:f.taxMode, overageTaxMode:f.overageTaxMode, machineType:f.machineType, multiCalcMode:f.multiCalcMode,
-               baseRent:totalRent, rentNote:isSingle?f.rentNote:"", model:f.model,
+               baseRent:totalRent, rentNote:f.rentNote||"", model:f.model,
                bw:{current:f.bwCur,prev:f.bwPrev,quota:(Number(f.bwQuota)||0)*cycle,price:f.bwPrice,deduct:f.bwDeduct,note:f.bwDeductNote,...bw,
                  ...(f.machineSwapped ? {
                    machineSwapped:true,
@@ -529,15 +530,20 @@
 
           async function handleSave(andPrint=false){
             if(!f.clientName.trim()) return alert("請輸入客戶名稱");
-            setLoadingText(editRecordId ? "更新中..." : "儲存中..."); setLoading(true);
+            const isEdit = !!editRecordId;
+            setLoadingText(isEdit ? "更新中..." : "儲存中..."); setLoading(true);
             try {
               const cid=await upsertClientProfile(f);
               const rec=buildRecord(cid);
-              if (editRecordId) rec.id = editRecordId; // 編輯模式：覆蓋原記錄 ID
+              if (isEdit) {
+                rec.id = editRecordId;
+                // 先刪除舊記錄，再存新的，避免產生重複
+                try { await api("deleteRecord", {recordId: editRecordId}); } catch(e) { /* ignore */ }
+              }
               await api("saveRecord",{record:rec});
               await load(false);
               if(andPrint){ setPrintData(rec); setPage("preview"); setEditRecordId(null); }
-              else{ alert(editRecordId ? "✅ 已更新記錄！" : "已儲存！"); setF(emptyForm()); setEditRecordId(null); setPage(editRecordId ? "history" : "home"); }
+              else{ alert(isEdit ? "✅ 已更新記錄！" : "已儲存！"); setF(emptyForm()); setEditRecordId(null); setPage(isEdit ? "history" : "home"); }
             } catch(e){ alert("儲存失敗："+e.message); }
             setLoading(false);
           }
@@ -1052,8 +1058,8 @@
                     })()}
                     
                     <div style={{display:"flex",gap:12}}>
-                      <button style={{...btnS("accent"),flex:1}} onClick={()=>handleSave(true)}>💾 儲存並預覽帳單</button>
-                      <button style={{...btnS("light"),flex:1}} onClick={()=>handleSave(false)}>儲存（不印）</button>
+                      <button style={{...btnS("accent"),flex:1}} onClick={()=>handleSave(true)}>{editRecordId ? "✏️ 更新並預覽帳單" : "💾 儲存並預覽帳單"}</button>
+                      <button style={{...btnS("light"),flex:1}} onClick={()=>handleSave(false)}>{editRecordId ? "✏️ 更新（不印）" : "儲存（不印）"}</button>
                     </div>
                   </>)}
                 </div>
@@ -1083,7 +1089,8 @@
                   bw2colConvert: !!ec.bw2colConvert,
                   bw2colRatio: ec.bw2colRatio || "10",
                   bw2colMultiMode: ec.bw2colMultiMode || "perMachine",
-                  multiCalcMode: ec.multiCalcMode || "pooled"
+                  multiCalcMode: ec.multiCalcMode || "pooled",
+                  memo: ec.memo || ""
               }];
 
               try { await api("saveClient",{client:{...ec,id:ec._isNew?String(Date.now()):ec.id, machines: payloadMs, _isNew:undefined}}); await load(false); setEditClient(null); }
@@ -1108,6 +1115,10 @@
                 <div style={{padding:"20px 16px",maxWidth:600,margin:"0 auto"}}>
                   <div style={{background:"#FFF",borderRadius:6,padding:20,marginBottom:16}}>
                     <div style={{marginBottom:14}}><label style={lbl}>客戶名稱 *</label><input style={inp()} value={ec.name||""} onChange={e=>updEc({name:e.target.value})}/></div>
+                    <div style={{marginBottom:14,background:C.orangeBg,border:"1px solid "+C.orangeBorder,borderRadius:4,padding:12}}>
+                      <label style={{...lbl,fontWeight:"bold",color:C.orange}}>備註（結算月份、繳費方式、特殊約定等）</label>
+                      <textarea style={{...inp(),minHeight:48,resize:"vertical"}} value={ec.memo||ec.rentNote||""} onChange={e=>updEc({memo:e.target.value,rentNote:e.target.value})} placeholder="例：每月 15 號結算 / 季繳 / 超印四個月結"/>
+                    </div>
                     
                     <div style={{borderTop:"1px solid "+C.light, paddingTop:12, marginBottom:16, display:"grid", gridTemplateColumns:"1fr 1fr", gap:12}}>
                        <div>
@@ -1175,7 +1186,7 @@
                           <div style={{fontSize:11,color:C.blue,letterSpacing:2,marginBottom:10,fontWeight:"bold"}}>💰 基本租金</div>
                           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
                             <div><label style={lbl}>金額（元/單月）</label><input style={inp()} value={ec.baseRent||""} onChange={e=>updEc({baseRent:e.target.value})} placeholder="0"/></div>
-                            <div><label style={lbl}>備註</label><input style={inp()} value={ec.rentNote||""} onChange={e=>updEc({rentNote:e.target.value})} placeholder="月租金"/></div>
+                            <div><label style={lbl}>備註</label><input style={inp()} value={ec.rentNote||ec.memo||""} onChange={e=>updEc({rentNote:e.target.value,memo:e.target.value})} placeholder="月租金"/></div>
                           </div>
                         </div>
                       </>
@@ -1265,6 +1276,7 @@
                       <div>
                         <div style={{fontWeight:"bold",fontSize:16}}>{c.name} <span style={{fontSize:11, color:C.danger, fontWeight:"bold", marginLeft:6}}>[{c.billingCycle||1}個月結]</span>{c.rentCycle && String(c.rentCycle)!==String(c.billingCycle||"1") && <span style={{fontSize:11, color:C.blue, fontWeight:"bold", marginLeft:4}}>[租金{c.rentCycle}個月]</span>}</div>
                         <div style={{fontSize:12,color:C.muted,marginTop:3}}>{c.mode==="single"?"單台":"多台"} ｜ 租金:{c.taxMode||"未稅"} / 超印:{c.overageTaxMode||c.taxMode||"未稅"} ｜ {c.machineType==="bw"?"黑白機":"彩色機"}</div>
+                        {(c.memo||c.rentNote) && <div style={{fontSize:11,color:C.orange,marginTop:3,fontWeight:"bold"}}>📝 {c.memo||c.rentNote}</div>}
                       </div>
                       <div style={{display:"flex",gap:8}}>
                         <button onClick={()=>setEditClient({...c})} style={{...btnS("light"),padding:"6px 14px",fontSize:12}}>編輯</button>
