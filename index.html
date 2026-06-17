@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>華芝商業機器 - 印量管理系統</title>
-    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js" onerror="document.getElementById('root').innerHTML='<h2 style=color:red>❌ React 載入失敗，請檢查網路連線</h2>'"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js" onerror="document.getElementById('root').innerHTML='<h2 style=color:red>❌ ReactDOM 載入失敗</h2>'"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.26.2/babel.min.js" onerror="document.getElementById('root').innerHTML='<h2 style=color:red>❌ Babel 載入失敗</h2>'"></script>
 </head>
 <body style="margin:0; padding:0; background-color:#F5F3EE; font-family:'新細明體', 'PMingLiU', serif;">
     <div id="root"></div>
@@ -1544,6 +1544,11 @@
 
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<App />);
+    </script>
+    <script>
+      window.onerror = function(msg, url, line, col, err) {
+        document.getElementById('root').innerHTML = '<div style="padding:40px;font-family:monospace;color:red"><h2>⚠️ JavaScript 執行錯誤</h2><pre>' + msg + '\n行號: ' + line + '\n' + (err ? err.stack : '') + '</pre></div>';
+      };
     </script>
 </body>
 </html>
