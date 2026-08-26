@@ -283,6 +283,15 @@ function App() {
   const [showDropdown, setShowDropdown] = useState(false);
   const [showHistDropdown, setShowHistDropdown] = useState(false);
   const [loadError, setLoadError] = useState("");
+
+  // ── 分期載入 ──────────────────────────────────────────────
+  // 開啟時只載「本期」的記錄，要看更早的再另外去要。
+  // 這樣帳單累積再多，開啟速度都一樣快。
+  const [loadedAll, setLoadedAll] = useState(false); // 是否已經載入全部歷史
+  const [loadedPeriods, setLoadedPeriods] = useState([]); // 已載入哪幾期，例如 ["115-8"]
+  const [totalRecordCount, setTotalRecordCount] = useState(0); // 伺服器上實際有幾筆（首頁顯示用）
+  const [periodLoading, setPeriodLoading] = useState(false); // 正在補載某一期
+  const periodKey = (y, m) => String(y) + "-" + String(m);
   const upd = p => setF(prev => ({
     ...prev,
     ...p
@@ -293,79 +302,97 @@ function App() {
       [field]: val
     } : m)
   });
-  const load = useCallback(async (showLoad = true) => {
+
+  // 把後端回來的客戶資料整理成畫面要的格式（含那個「設定背包」）
+  const parseClientList = useCallback(cs => (Array.isArray(cs) ? cs : []).map(c => {
+    let msRaw = safeParse(c.machines, []);
+    let ms = Array.isArray(msRaw) ? [...msRaw] : [];
+    let sets = {
+      taxMode: "未稅",
+      overageTaxMode: "未稅",
+      billingCycle: "1",
+      rentCycle: "",
+      bw2colConvert: false,
+      bw2colRatio: "10",
+      bw2colMultiMode: "perMachine",
+      machineType: "color",
+      multiCalcMode: "pooled",
+      memo: "",
+      billingDeadlineDay: ""
+    };
+    const backpacks = ms.filter(x => x && x._isSettings);
+    if (backpacks.length > 0) sets = {
+      ...sets,
+      ...backpacks[backpacks.length - 1]
+    };
+    ms = ms.filter(x => !x || !x._isSettings);
+    if (sets.taxMode === "含稅") sets.taxMode = "外加";
+    if (sets.overageTaxMode === "含稅") sets.overageTaxMode = "外加";
+    if (!sets.overageTaxMode) sets.overageTaxMode = sets.taxMode;
+    return {
+      ...c,
+      ...sets,
+      machines: ms
+    };
+  }), []);
+  const parseRecordList = useCallback(rs => (Array.isArray(rs) ? rs : []).map(r => {
+    let tMode = r.taxMode;
+    if (tMode === "含稅") tMode = "外加";
+    let oMode = r.overageTaxMode || tMode;
+    if (oMode === "含稅") oMode = "外加";
+    return {
+      ...r,
+      taxMode: tMode,
+      overageTaxMode: oMode,
+      machines: safeParse(r.machines, []),
+      bw: safeParse(r.bw, {}),
+      col: safeParse(r.col, {})
+    };
+  }), []);
+
+  // loadAll=true 代表要把全部歷史抓回來；預設只抓本期
+  const load = useCallback(async (showLoad = true, loadAll = false) => {
     if (!apiReady) return;
     if (showLoad) {
       setLoadingText("載入資料中...");
       setLoading(true);
     }
+    const wantAll = loadAll || loadedAll;
+    const curY = String(CY),
+      curM = String(now.getMonth() + 1);
     try {
-      // 開啟時只打一趟 getAll（客戶+記錄一起回來，記錄用精簡模式）。
+      // 開啟時只打一趟 getAll（客戶+記錄一起回來，記錄用精簡模式，且只要本期）。
       // 萬一 Apps Script 還是舊版沒有 getAll，就自動退回原本的兩趟做法，
       // 這樣只更新網頁、忘了更新後端也不會壞掉。
-      let cs, rs;
+      let cs,
+        rs,
+        gotAll = false;
+      const opts = wantAll ? {
+        light: true
+      } : {
+        light: true,
+        year: curY,
+        month: curM
+      };
       const all = await api("getAll", {
-        options: {
-          light: true
-        }
+        options: opts
       });
       if (all && Array.isArray(all.clients) && Array.isArray(all.records)) {
         cs = all.clients;
         rs = all.records;
+        gotAll = true;
+        setTotalRecordCount(Number(all.recordCount) || all.records.length);
       } else {
+        // 舊後端：沒有分期功能，只能整包拿回來（等於全部都載了）
         [cs, rs] = await Promise.all([api("getClients"), api("getRecords", {
           filters: {}
         })]);
+        setTotalRecordCount(Array.isArray(rs) ? rs.length : 0);
       }
-      const parsedClients = (Array.isArray(cs) ? cs : []).map(c => {
-        let msRaw = safeParse(c.machines, []);
-        let ms = Array.isArray(msRaw) ? [...msRaw] : [];
-        let sets = {
-          taxMode: "未稅",
-          overageTaxMode: "未稅",
-          billingCycle: "1",
-          rentCycle: "",
-          bw2colConvert: false,
-          bw2colRatio: "10",
-          bw2colMultiMode: "perMachine",
-          machineType: "color",
-          multiCalcMode: "pooled",
-          memo: "",
-          billingDeadlineDay: ""
-        };
-        const backpacks = ms.filter(x => x && x._isSettings);
-        if (backpacks.length > 0) {
-          sets = {
-            ...sets,
-            ...backpacks[backpacks.length - 1]
-          };
-        }
-        ms = ms.filter(x => !x || !x._isSettings);
-        if (sets.taxMode === "含稅") sets.taxMode = "外加";
-        if (sets.overageTaxMode === "含稅") sets.overageTaxMode = "外加";
-        if (!sets.overageTaxMode) sets.overageTaxMode = sets.taxMode;
-        return {
-          ...c,
-          ...sets,
-          machines: ms
-        };
-      });
-      const parsedRecords = (Array.isArray(rs) ? rs : []).map(r => {
-        let tMode = r.taxMode;
-        if (tMode === "含稅") tMode = "外加";
-        let oMode = r.overageTaxMode || tMode;
-        if (oMode === "含稅") oMode = "外加";
-        return {
-          ...r,
-          taxMode: tMode,
-          overageTaxMode: oMode,
-          machines: safeParse(r.machines, []),
-          bw: safeParse(r.bw, {}),
-          col: safeParse(r.col, {})
-        };
-      });
-      setClients(parsedClients);
-      setRecords(parsedRecords);
+      setLoadedAll(wantAll || !gotAll);
+      setLoadedPeriods(wantAll || !gotAll ? [] : [periodKey(curY, curM)]);
+      setClients(parseClientList(cs));
+      setRecords(parseRecordList(rs));
       setLoadError("");
     } catch (e) {
       const msg = e?.message || String(e);
@@ -373,10 +400,65 @@ function App() {
       if (showLoad) alert("載入失敗：" + msg + "\n\n可點畫面上的「重新連線」按鈕重試。");
     }
     setLoading(false);
-  }, [apiReady]);
+  }, [apiReady, loadedAll, parseClientList, parseRecordList]);
   useEffect(() => {
     load();
-  }, [load]);
+  }, [apiReady]); // eslint-disable-line
+
+  // 把新抓到的記錄併進來（用 id 去重，避免重複）
+  const mergeRecords = useCallback(incoming => {
+    setRecords(prev => {
+      const seen = new Set(prev.map(r => String(r.id)));
+      const add = incoming.filter(r => !seen.has(String(r.id)));
+      return add.length ? [...prev, ...add] : prev;
+    });
+  }, []);
+
+  // 確保「某一年某一月」的記錄有載進來。
+  // 這很重要：「尚未開單」是靠「這期記錄裡沒出現的客戶」來判斷的，
+  // 如果那一期沒載到，會把已經開過單的客戶也列成尚未開單，就可能重複開單。
+  const ensurePeriod = useCallback(async (y, m) => {
+    if (!apiReady || loadedAll || !y || !m) return;
+    const key = periodKey(y, m);
+    if (loadedPeriods.indexOf(key) !== -1) return;
+    setPeriodLoading(true);
+    try {
+      const rs = await api("getRecords", {
+        filters: {
+          year: String(y),
+          month: String(m),
+          light: true
+        }
+      });
+      if (Array.isArray(rs)) {
+        mergeRecords(parseRecordList(rs));
+        setLoadedPeriods(prev => prev.indexOf(key) !== -1 ? prev : [...prev, key]);
+      }
+    } catch (e) {/* 補載失敗就維持現狀，下面會提示使用者 */}
+    setPeriodLoading(false);
+  }, [apiReady, loadedAll, loadedPeriods, mergeRecords, parseRecordList]);
+
+  // 使用者按「載入全部歷史」
+  const loadAllHistory = useCallback(async () => {
+    if (!apiReady || loadedAll) return;
+    setLoadingText("載入全部歷史記錄...");
+    setLoading(true);
+    try {
+      const rs = await api("getRecords", {
+        filters: {
+          light: true
+        }
+      });
+      if (Array.isArray(rs)) {
+        setRecords(parseRecordList(rs));
+        setLoadedAll(true);
+        setTotalRecordCount(rs.length);
+      }
+    } catch (e) {
+      alert("載入失敗：" + (e?.message || e));
+    }
+    setLoading(false);
+  }, [apiReady, loadedAll, parseRecordList]);
   async function selectClient(name) {
     upd({
       clientName: name
@@ -958,6 +1040,20 @@ function App() {
     setLoading(false);
   }
   const filtered = records.filter(r => (!fYear || r.billingYear === String(fYear)) && (!fMonth || r.billingMonth === String(fMonth)) && (!fClient || r.clientName?.includes(fClient)));
+
+  // 進到「尚未開單」或切換年月時，先確保那一期的記錄有載進來，
+  // 否則會把已開單的客戶誤判成尚未開單。
+  useEffect(() => {
+    if (page === "pending") ensurePeriod(pYear, pMonth);
+  }, [page, pYear, pMonth, ensurePeriod]);
+
+  // 歷史查詢時如果指定了某個年月，也順手把那一期補載進來
+  useEffect(() => {
+    if (page === "history" && fYear && fMonth) ensurePeriod(fYear, fMonth);
+  }, [page, fYear, fMonth, ensurePeriod]);
+
+  // 那一期到底載好了沒？沒載好就不能相信「尚未開單」的結果
+  const pendingPeriodReady = loadedAll || loadedPeriods.indexOf(periodKey(pYear, pMonth)) !== -1;
   const billedNamesThisPeriod = new Set(records.filter(r => String(r.billingYear) === String(pYear) && String(r.billingMonth) === String(pMonth)).map(r => r.clientName));
   const todayDay = now.getDate();
   const curCY = CY,
@@ -1157,7 +1253,7 @@ function App() {
       fontSize: 12,
       color: C.muted
     }
-  }, "已儲存 ", records.length, " 筆記錄 · ", clients.length, " 位客戶"), loadError && /*#__PURE__*/React.createElement("div", {
+  }, "已儲存 ", Math.max(totalRecordCount, records.length), " 筆記錄 · ", clients.length, " 位客戶"), loadError && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 16,
       background: "#FFF0F0",
@@ -4035,28 +4131,35 @@ function App() {
       marginBottom: 10,
       fontWeight: "bold"
     }
-  }, "民國 ", pYear, " 年 ", pMonth, " 月 ｜ 共 ", clients.length, " 位客戶，尚未開單 ", pendingAll.length, " 位", pOverdueOnly || dueByCutoff !== null ? "（篩選後顯示 " + pendingClients.length + " 位）" : ""), clients.length === 0 && /*#__PURE__*/React.createElement("div", {
+  }, "民國 ", pYear, " 年 ", pMonth, " 月 ｜ 共 ", clients.length, " 位客戶，尚未開單 ", pendingAll.length, " 位", pOverdueOnly || dueByCutoff !== null ? "（篩選後顯示 " + pendingClients.length + " 位）" : ""), !pendingPeriodReady && /*#__PURE__*/React.createElement("div", {
     style: {
       textAlign: "center",
       color: C.muted,
       padding: 60,
       fontWeight: "bold"
     }
-  }, "尚無客戶資料"), clients.length > 0 && pendingAll.length === 0 && /*#__PURE__*/React.createElement("div", {
+  }, "正在讀取民國 ", pYear, " 年 ", pMonth, " 月的開單狀況..."), pendingPeriodReady && clients.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      color: C.muted,
+      padding: 60,
+      fontWeight: "bold"
+    }
+  }, "尚無客戶資料"), pendingPeriodReady && clients.length > 0 && pendingAll.length === 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       textAlign: "center",
       color: C.success,
       padding: 60,
       fontWeight: "bold"
     }
-  }, "🎉 本期所有客戶皆已開單"), clients.length > 0 && pendingAll.length > 0 && pendingClients.length === 0 && /*#__PURE__*/React.createElement("div", {
+  }, "🎉 本期所有客戶皆已開單"), pendingPeriodReady && clients.length > 0 && pendingAll.length > 0 && pendingClients.length === 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       textAlign: "center",
       color: C.success,
       padding: 60,
       fontWeight: "bold"
     }
-  }, "🎉 符合篩選條件的客戶目前是 0 位"), pendingClients.map(c => /*#__PURE__*/React.createElement("div", {
+  }, "🎉 符合篩選條件的客戶目前是 0 位"), pendingPeriodReady && pendingClients.map(c => /*#__PURE__*/React.createElement("div", {
     key: c.id,
     style: {
       background: "#FFF",
@@ -4300,7 +4403,33 @@ function App() {
       marginBottom: 10,
       fontWeight: "bold"
     }
-  }, "共 ", filtered.length, " 筆"), filtered.map(r => /*#__PURE__*/React.createElement("div", {
+  }, "共 ", filtered.length, " 筆", !loadedAll && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: "normal"
+    }
+  }, "（目前只載入本月，共有 ", totalRecordCount, " 筆）"), periodLoading && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: "normal",
+      color: C.blue
+    }
+  }, " ・讀取中...")), !loadedAll && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#FFF",
+      borderRadius: 6,
+      padding: "14px 16px",
+      marginBottom: 12,
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.muted,
+      marginBottom: 10
+    }
+  }, "為了開得快，一開始只載入本月的記錄"), /*#__PURE__*/React.createElement("button", {
+    style: btnS("accent"),
+    onClick: loadAllHistory
+  }, "📂 載入以前的記錄（全部 ", totalRecordCount, " 筆）")), filtered.map(r => /*#__PURE__*/React.createElement("div", {
     key: r.id,
     style: {
       background: "#FFF",
