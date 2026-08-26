@@ -479,12 +479,24 @@ function App() {
     setLoadingText("讀取上期資料...");
     setLoading(true);
     try {
-      const prevRecs = await api("getRecords", {
-        filters: {
-          clientId: client.id
-        }
+      // 只要「上一筆」就好。新後端有 getLastRecord 可以直接給一筆，
+      // 不用把這個客戶的所有帳單全撈回來再丟掉。舊後端就退回原本做法。
+      let prev = null;
+      const one = await api("getLastRecord", {
+        clientId: client.id
       });
-      const prev = Array.isArray(prevRecs) && prevRecs.length > 0 ? prevRecs[0] : null;
+      if (one && one.id) {
+        prev = one;
+      } else if (!one || !one.error) {
+        prev = null; // 新後端明確回「沒有上一筆」
+      } else {
+        const prevRecs = await api("getRecords", {
+          filters: {
+            clientId: client.id
+          }
+        });
+        prev = Array.isArray(prevRecs) && prevRecs.length > 0 ? prevRecs[0] : null;
+      }
       let pMachines = prev ? safeParse(prev.machines, []) : [];
       let pbw = prev ? safeParse(prev.bw, {}) : {};
       let pcol = prev ? safeParse(prev.col, {}) : {};
