@@ -389,10 +389,22 @@ function App() {
         })]);
         setTotalRecordCount(Array.isArray(rs) ? rs.length : 0);
       }
-      setLoadedAll(wantAll || !gotAll);
-      setLoadedPeriods(wantAll || !gotAll ? [] : [periodKey(curY, curM)]);
+      const isFullSet = wantAll || !gotAll;
+      const fresh = parseRecordList(rs);
+      setLoadedAll(isFullSet);
       setClients(parseClientList(cs));
-      setRecords(parseRecordList(rs));
+      if (isFullSet) {
+        setLoadedPeriods([]);
+        setRecords(fresh);
+      } else {
+        // 只重抓了本期：把本期的舊資料換成新的，但保留使用者已經另外載入的其他期別，
+        // 這樣在「尚未開單」看 3 月時做背景更新，畫面不會突然變回「讀取中」。
+        setRecords(prev => {
+          const kept = prev.filter(r => !(String(r.billingYear) === curY && String(r.billingMonth) === curM));
+          return kept.concat(fresh);
+        });
+        setLoadedPeriods(prev => prev.indexOf(periodKey(curY, curM)) !== -1 ? prev : [...prev, periodKey(curY, curM)]);
+      }
       setLoadError("");
     } catch (e) {
       const msg = e?.message || String(e);
@@ -1243,16 +1255,16 @@ function App() {
       width: "100%"
     }),
     onClick: () => {
-      load();
       setPage("history");
+      load(false);
     }
   }, "📋 查詢歷史記錄"), /*#__PURE__*/React.createElement("button", {
     style: btnS("light", {
       width: "100%"
     }),
     onClick: () => {
-      load();
       setPage("pending");
+      load(false);
     }
   }, "🕒 本月尚未開單客戶"), /*#__PURE__*/React.createElement("button", {
     style: btnS("light", {
