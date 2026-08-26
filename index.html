@@ -351,7 +351,8 @@ function App() {
   }), []);
 
   // loadAll=true 代表要把全部歷史抓回來；預設只抓本期
-  const load = useCallback(async (showLoad = true, loadAll = false) => {
+  // fresh=true 代表使用者按了「重新整理」，要跳過後端快取直接讀試算表
+  const load = useCallback(async (showLoad = true, loadAll = false, fresh = false) => {
     if (!apiReady) return;
     if (showLoad) {
       setLoadingText("載入資料中...");
@@ -368,11 +369,13 @@ function App() {
         rs,
         gotAll = false;
       const opts = wantAll ? {
-        light: true
+        light: true,
+        fresh: fresh
       } : {
         light: true,
         year: curY,
-        month: curM
+        month: curM,
+        fresh: fresh
       };
       const all = await api("getAll", {
         options: opts
@@ -390,18 +393,18 @@ function App() {
         setTotalRecordCount(Array.isArray(rs) ? rs.length : 0);
       }
       const isFullSet = wantAll || !gotAll;
-      const fresh = parseRecordList(rs);
+      const freshRows = parseRecordList(rs); // 注意：別叫 fresh，會跟參數撞名
       setLoadedAll(isFullSet);
       setClients(parseClientList(cs));
       if (isFullSet) {
         setLoadedPeriods([]);
-        setRecords(fresh);
+        setRecords(freshRows);
       } else {
         // 只重抓了本期：把本期的舊資料換成新的，但保留使用者已經另外載入的其他期別，
         // 這樣在「尚未開單」看 3 月時做背景更新，畫面不會突然變回「讀取中」。
         setRecords(prev => {
           const kept = prev.filter(r => !(String(r.billingYear) === curY && String(r.billingMonth) === curM));
-          return kept.concat(fresh);
+          return kept.concat(freshRows);
         });
         setLoadedPeriods(prev => prev.indexOf(periodKey(curY, curM)) !== -1 ? prev : [...prev, periodKey(curY, curM)]);
       }
@@ -3974,7 +3977,7 @@ function App() {
       fontWeight: "bold"
     }
   }, "尚未開單客戶")), /*#__PURE__*/React.createElement("button", {
-    onClick: () => load(),
+    onClick: () => load(true, false, true),
     style: {
       marginLeft: "auto",
       background: "none",
@@ -4281,7 +4284,7 @@ function App() {
       fontWeight: "bold"
     }
   }, "歷史查詢")), /*#__PURE__*/React.createElement("button", {
-    onClick: () => load(),
+    onClick: () => load(true, false, true),
     style: {
       marginLeft: "auto",
       background: "none",
