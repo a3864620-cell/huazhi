@@ -69,6 +69,240 @@ const lbl = {
   marginBottom: 4,
   display: "block"
 };
+
+// ── 超印階梯計價 ────────────────────────────────────────────
+// tiers 格式：[{upTo:"800", price:"3"}, {upTo:"", price:"2.5"}]
+//   upTo  = 累計到「第幾張」為止，最後一段留空 = 以上不限
+//   例：超出 900 張 → 前 800 張 x $3 = 2400，後 100 張 x $2.5 = 250，合計 2650
+function asTiers(v) {
+  const arr = typeof v === "string" ? safeParse(v, []) : v;
+  return Array.isArray(arr) ? arr.filter(t => t && typeof t === "object").map(t => ({
+    upTo: t.upTo === undefined || t.upTo === null ? "" : String(t.upTo),
+    price: t.price === undefined || t.price === null ? "" : String(t.price)
+  })) : [];
+}
+// 整理成可計算的級距：去掉沒填的、由小到大排序、重複門檻只留一筆
+function normTiers(tiers) {
+  const out = [];
+  asTiers(tiers).forEach(t => {
+    const price = Number(t.price);
+    if (String(t.price).trim() === "" || !isFinite(price) || price < 0) return;
+    const up = String(t.upTo).trim() === "" ? Infinity : Number(t.upTo);
+    out.push({
+      upTo: isFinite(up) && up > 0 ? up : Infinity,
+      price: price
+    });
+  });
+  out.sort((a, b) => a.upTo - b.upTo);
+  const dedup = [];
+  out.forEach(t => {
+    if (!dedup.length || t.upTo !== dedup[dedup.length - 1].upTo) dedup.push(t);
+  });
+  return dedup;
+}
+// 算超印費用。級距沒設好時自動退回原本的單一單價，不會算錯
+function tierFee(over, flatPrice, tiers) {
+  const n = Math.max(0, Number(over) || 0);
+  const flat = Number(flatPrice) || 0;
+  const list = normTiers(tiers);
+  if (list.length === 0) return {
+    fee: Math.round(n * flat),
+    rows: [],
+    on: false
+  };
+  if (n === 0) return {
+    fee: 0,
+    rows: [],
+    on: true
+  };
+  let remain = n,
+    from = 0,
+    sum = 0;
+  const rows = [];
+  for (let i = 0; i < list.length && remain > 0; i++) {
+    const limit = list[i].upTo;
+    const width = limit === Infinity ? remain : Math.max(0, limit - from);
+    const use = Math.min(remain, width);
+    if (use > 0) {
+      sum += use * list[i].price;
+      rows.push({
+        from: from + 1,
+        to: from + use,
+        qty: use,
+        price: list[i].price,
+        amount: use * list[i].price
+      });
+      remain -= use;
+      from += use;
+    }
+    if (limit !== Infinity && from < limit) from = limit;
+  }
+  // 級距沒寫到「以上不限」時，剩下的張數延用最後一段單價
+  if (remain > 0) {
+    const p = list[list.length - 1].price;
+    sum += remain * p;
+    rows.push({
+      from: from + 1,
+      to: from + remain,
+      qty: remain,
+      price: p,
+      amount: remain * p
+    });
+  }
+  return {
+    fee: Math.round(sum),
+    rows: rows,
+    on: true
+  };
+}
+// 存檔用：整列都沒填的級距不寫進資料庫
+function saveTiers(v) {
+  return asTiers(v).filter(t => String(t.upTo).trim() !== "" || String(t.price).trim() !== "");
+}
+function tiersActive(enabled, tiers) {
+  return !!enabled && normTiers(tiers).length > 0;
+}
+// 「前 800 張 $3 ／ 超過 800 張 $2.5」這種一行摘要
+function tierSummary(tiers) {
+  const list = normTiers(tiers);
+  if (!list.length) return "";
+  return list.map((t, i) => {
+    const prev = i === 0 ? 0 : list[i - 1].upTo;
+    if (t.upTo === Infinity) return (prev > 0 ? "超過 " + prev.toLocaleString() + " 張" : "全部") + " $" + t.price;
+    return (prev > 0 ? "第 " + (prev + 1).toLocaleString() + "–" + t.upTo.toLocaleString() : "前 " + t.upTo.toLocaleString()) + " 張 $" + t.price;
+  }).join(" ／ ");
+}
+// 畫面上的一行階梯明細（試算用，橘色）
+function tierLine(rows) {
+  if (!Array.isArray(rows) || rows.length < 2) return null;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.orange,
+      background: C.orangeBg,
+      border: "1px dashed " + C.orangeBorder,
+      borderRadius: 4,
+      padding: "5px 10px",
+      marginBottom: 8,
+      fontWeight: "bold"
+    }
+  }, "⚡ 階梯：" + rows.map(t => t.qty.toLocaleString() + " 張 × $" + t.price + " = $" + Math.round(t.amount).toLocaleString()).join("　＋　"));
+}
+// 帳單上的階梯說明框（黑白印刷用）
+function tierNote(label, rows) {
+  if (!Array.isArray(rows) || rows.length < 2) return null;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: "1px solid #000",
+      borderRadius: 4,
+      padding: "8px 14px",
+      fontSize: 11,
+      color: "#000",
+      fontWeight: "bold",
+      marginBottom: 8
+    }
+  }, "⚡ " + label + "超印階梯計價：" + rows.map(t => "第 " + t.from.toLocaleString() + "–" + t.to.toLocaleString() + " 張 × $" + t.price + " = $" + Math.round(t.amount).toLocaleString()).join("　＋　") + "　＝　$" + Math.round(rows.reduce((s, t) => s + t.amount, 0)).toLocaleString());
+}
+// 帳單表格「單價」欄：走階梯時顯示「階梯」而不是單一價
+function priceCell(d) {
+  const rows = Array.isArray(d && d.tierRows) ? d.tierRows : [];
+  if (rows.length === 1) return "$" + rows[0].price;
+  if (rows.length > 1) return "階梯";
+  const p = d && d.price !== undefined && d.price !== null && d.price !== "" ? d.price : 0;
+  return "$" + p;
+}
+// 級距編輯器（客戶資料管理 與 新增印量記錄 共用）
+function TierEditor({
+  title,
+  color,
+  tiers,
+  onChange
+}) {
+  const rows = asTiers(tiers);
+  const setRow = (i, field, val) => onChange(rows.map((t, j) => j === i ? {
+    ...t,
+    [field]: val
+  } : t));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: "bold",
+      color: color,
+      marginBottom: 8
+    }
+  }, title), rows.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.muted,
+      marginBottom: 8
+    }
+  }, "尚未設定級距，請按下方「＋ 新增級距」"), rows.map((t, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      marginBottom: 6,
+      fontSize: 12,
+      fontWeight: "bold",
+      color: C.text,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.muted,
+      fontSize: 11,
+      minWidth: 52
+    }
+  }, String(t.upTo).trim() === "" ? "最後一段" : i === 0 ? "超出的前" : "累計到"), /*#__PURE__*/React.createElement("input", {
+    style: inp({
+      width: 82,
+      padding: "6px 8px",
+      textAlign: "center"
+    }),
+    value: t.upTo,
+    placeholder: "不限",
+    onChange: e => setRow(i, "upTo", e.target.value)
+  }), /*#__PURE__*/React.createElement("span", null, String(t.upTo).trim() === "" ? "，每張 $" : "張，每張 $"), /*#__PURE__*/React.createElement("input", {
+    style: inp({
+      width: 72,
+      padding: "6px 8px",
+      textAlign: "center",
+      border: "2px solid " + color
+    }),
+    value: t.price,
+    placeholder: "0",
+    onChange: e => setRow(i, "price", e.target.value)
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onChange(rows.filter((_, j) => j !== i)),
+    style: {
+      ...btnS("red"),
+      padding: "4px 9px",
+      fontSize: 11
+    }
+  }, "✕"))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onChange([...rows, {
+      upTo: "",
+      price: ""
+    }]),
+    style: {
+      ...btnS("light"),
+      padding: "4px 12px",
+      fontSize: 11
+    }
+  }, "＋ 新增級距"), normTiers(rows).length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.success,
+      marginTop: 7,
+      fontWeight: "bold"
+    }
+  }, "✓ ", tierSummary(rows)));
+}
 const PRINT_CSS = `
           @media print {
             body * { visibility: hidden !important; }
@@ -119,7 +353,7 @@ function safeParse(val, fallback) {
   }
   return val || fallback;
 }
-function calcFee(cur, prev, quota, price, deduct = 0, cycle = 1) {
+function calcFee(cur, prev, quota, price, deduct = 0, cycle = 1, tiers = null) {
   const safeCur = Number(cur) || 0;
   const safePrev = Number(prev) || 0;
   const safeQuota = Number(quota) || 0;
@@ -130,11 +364,14 @@ function calcFee(cur, prev, quota, price, deduct = 0, cycle = 1) {
   const actual = Math.max(0, raw - safeDeduct);
   const totalQuota = safeQuota * safeCycle;
   const over = Math.max(0, actual - totalQuota);
+  const tf = tierFee(over, safePrice, tiers);
   return {
     raw,
     actual,
     over,
-    fee: Math.round(over * safePrice)
+    fee: tf.fee,
+    tierRows: tf.rows,
+    tiered: tf.on
   };
 }
 const emptyMachine = () => ({
@@ -174,6 +411,9 @@ function emptyForm() {
     bw2colConvert: false,
     bw2colRatio: "10",
     bw2colMultiMode: "perMachine",
+    tierEnabled: false,
+    bwTiers: [],
+    colTiers: [],
     periodStart: "",
     periodEnd: "",
     baseRent: "",
@@ -317,6 +557,9 @@ function App() {
       bw2colMultiMode: "perMachine",
       machineType: "color",
       multiCalcMode: "pooled",
+      tierEnabled: false,
+      bwTiers: [],
+      colTiers: [],
       memo: "",
       billingDeadlineDay: ""
     };
@@ -326,6 +569,9 @@ function App() {
       ...backpacks[backpacks.length - 1]
     };
     ms = ms.filter(x => !x || !x._isSettings);
+    sets.tierEnabled = !!sets.tierEnabled;
+    sets.bwTiers = asTiers(sets.bwTiers);
+    sets.colTiers = asTiers(sets.colTiers);
     if (sets.taxMode === "含稅") sets.taxMode = "外加";
     if (sets.overageTaxMode === "含稅") sets.overageTaxMode = "外加";
     if (!sets.overageTaxMode) sets.overageTaxMode = sets.taxMode;
@@ -529,6 +775,9 @@ function App() {
         bw2colMultiMode: client.bw2colMultiMode || "perMachine",
         machineType: client.machineType || "color",
         multiCalcMode: client.multiCalcMode || "pooled",
+        tierEnabled: !!client.tierEnabled,
+        bwTiers: asTiers(client.bwTiers),
+        colTiers: asTiers(client.colTiers),
         bwQuota: String(client.bwQuota || ""),
         bwPrice: String(client.bwPrice || "0.35"),
         colQuota: String(client.colQuota || ""),
@@ -604,6 +853,9 @@ function App() {
       bw2colMultiMode: form.bw2colMultiMode || "perMachine",
       machineType: form.machineType || "color",
       multiCalcMode: form.multiCalcMode || "pooled",
+      tierEnabled: !!form.tierEnabled,
+      bwTiers: saveTiers(form.bwTiers),
+      colTiers: saveTiers(form.colTiers),
       memo: form.rentNote || existing?.memo || "",
       billingDeadlineDay: existing?.billingDeadlineDay || ""
     }];
@@ -637,24 +889,32 @@ function App() {
     // 換機模式：總印量 = 舊機印量 + 新機印量
     const bwNewExtra = f.machineSwapped ? Math.max(0, (Number(f.bwNewCur) || 0) - (Number(f.bwNewInit) || 0)) : 0;
     const colNewExtra = f.machineSwapped ? Math.max(0, (Number(f.colNewCur) || 0) - (Number(f.colNewInit) || 0)) : 0;
-    const bwCalc = calcFee(f.bwCur, f.bwPrev, f.bwQuota, f.bwPrice, f.bwDeduct, cycle);
+    // 階梯計價只套用在「單台」與「多台－總額度合併計算」；
+    // 多台－各機台獨立計算 仍走各台自己的單一單價
+    const tierUse = !!f.tierEnabled && (isSingle || f.multiCalcMode === "pooled");
+    const bwT = tierUse ? f.bwTiers : null;
+    const colT = tierUse ? f.colTiers : null;
+    const bwCalc = calcFee(f.bwCur, f.bwPrev, f.bwQuota, f.bwPrice, f.bwDeduct, cycle, bwT);
     const colCalcBase = f.machineType === "bw" ? {
       raw: 0,
       actual: 0,
       over: 0,
       fee: 0
-    } : calcFee(f.colCur, f.colPrev, f.colQuota, f.colPrice, f.colDeduct, cycle);
+    } : calcFee(f.colCur, f.colPrev, f.colQuota, f.colPrice, f.colDeduct, cycle, colT);
     // 把新機印量加入，重新計算超印
     const bwRawTotal = bwCalc.raw + bwNewExtra;
     const bwActualTotal = Math.max(0, bwRawTotal - (Number(f.bwDeduct) || 0));
     const bwQuotaTotal = (Number(f.bwQuota) || 0) * cycle;
     const bwOverTotal = Math.max(0, bwActualTotal - bwQuotaTotal);
+    const bwTF = tierFee(bwOverTotal, f.bwPrice, bwT);
     const bw = {
       ...bwCalc,
       raw: bwRawTotal,
       actual: bwActualTotal,
       over: bwOverTotal,
-      fee: Math.round(bwOverTotal * (Number(f.bwPrice) || 0))
+      fee: bwTF.fee,
+      tierRows: bwTF.rows,
+      tiered: bwTF.on
     };
     const colRawTotal = colCalcBase.raw + colNewExtra;
     const colActualTotal = Math.max(0, colRawTotal - (Number(f.colDeduct) || 0));
@@ -666,6 +926,7 @@ function App() {
     const colBonus = convOn ? Math.floor(bwLeftover / convRatio) : 0;
     const colQuotaEff = colQuotaTotal + colBonus;
     const colOverTotal = Math.max(0, colActualTotal - colQuotaEff);
+    const colTF = tierFee(colOverTotal, f.colPrice, colT);
     const col = f.machineType === "bw" ? {
       raw: 0,
       actual: 0,
@@ -681,7 +942,9 @@ function App() {
       raw: colRawTotal,
       actual: colActualTotal,
       over: colOverTotal,
-      fee: Math.round(colOverTotal * (Number(f.colPrice) || 0)),
+      fee: colTF.fee,
+      tierRows: colTF.rows,
+      tiered: colTF.on,
       quota: colQuotaEff,
       quotaBase: colQuotaTotal,
       bwConvertBonus: colBonus,
@@ -701,6 +964,8 @@ function App() {
     let tBwLeftover = 0,
       tColBonus = 0,
       multiColBonusForQuota = 0; // 多台換算彩色用
+    let poolBwTierRows = [],
+      poolColTierRows = []; // 多台合併計算的階梯明細
     const convMethod = f.bw2colMultiMode || "perMachine"; // perMachine 各台各自換 / pooled 全部併起來換
 
     const ms = f.machines.map(m => {
@@ -818,11 +1083,15 @@ function App() {
       if (f.multiCalcMode === "pooled") {
         const poolBwActual = Math.max(0, tBwRaw - tBwDeduct);
         tBwOver = Math.max(0, poolBwActual - tBwQuota);
-        tBwFee = Math.round(tBwOver * (Number(f.mBwPrice) || 0));
+        const pBwTF = tierFee(tBwOver, f.mBwPrice, bwT);
+        tBwFee = pBwTF.fee;
+        poolBwTierRows = pBwTF.rows;
         const poolColActual = Math.max(0, tColRaw - tColDeduct);
         multiColBonusForQuota = convPoolBonus; // 併入合併彩色總額度
         tColOver = Math.max(0, poolColActual - (tColQuota + multiColBonusForQuota));
-        tColFee = Math.round(tColOver * (Number(f.mColPrice) || 0));
+        const pColTF = tierFee(tColOver, f.mColPrice, colT);
+        tColFee = pColTF.fee;
+        poolColTierRows = pColTF.rows;
       }
       totalOverage = tBwFee + tColFee;
     }
@@ -848,6 +1117,11 @@ function App() {
       overageTaxMode: f.overageTaxMode,
       machineType: f.machineType,
       multiCalcMode: f.multiCalcMode,
+      tierEnabled: tierUse,
+      bwTiers: saveTiers(f.bwTiers),
+      colTiers: saveTiers(f.colTiers),
+      bwTierRows: isSingle ? bw.tierRows || [] : poolBwTierRows,
+      colTierRows: isSingle ? col.tierRows || [] : poolColTierRows,
       baseRent: totalRent,
       rentNote: f.rentNote || "",
       model: f.model,
@@ -927,6 +1201,9 @@ function App() {
       bw2colConvert: !!r.bw2colConvert,
       bw2colRatio: String(r.bw2colRatio || "10"),
       bw2colMultiMode: r.bw2colMultiMode || "perMachine",
+      tierEnabled: !!r.tierEnabled,
+      bwTiers: asTiers(r.bwTiers),
+      colTiers: asTiers(r.colTiers),
       periodStart: fixDate(r.periodStart || ""),
       periodEnd: fixDate(r.periodEnd || ""),
       baseRent: isSingle ? String(Math.round((Number(r.baseRent) || 0) / rentCycle)) : "",
@@ -1697,7 +1974,96 @@ function App() {
       onChange: v => upd({
         overageTaxMode: v
       })
-    }))))), f.mode === "single" && /*#__PURE__*/React.createElement("div", {
+    }))))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: "#FFF",
+        borderRadius: 6,
+        padding: 20,
+        marginBottom: 16,
+        borderLeft: "4px solid " + C.orange
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        marginBottom: f.tierEnabled ? 14 : 0,
+        gap: 12
+      }
+    }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        letterSpacing: 3,
+        color: C.orange,
+        fontWeight: "bold"
+      }
+    }, "⚡ 超印階梯計價"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: C.muted,
+        marginTop: 4
+      }
+    }, "超印愈多、單價愈低。例：前 800 張 $3，之後 $2.5 → 超印 900 張收 $2,650")), /*#__PURE__*/React.createElement("button", {
+      onClick: () => upd({
+        tierEnabled: !f.tierEnabled,
+        bwTiers: !f.tierEnabled && asTiers(f.bwTiers).length === 0 ? [{
+          upTo: "800",
+          price: String((f.mode === "multi" ? f.mBwPrice : f.bwPrice) || "0.35")
+        }, {
+          upTo: "",
+          price: ""
+        }] : f.bwTiers,
+        colTiers: !f.tierEnabled && asTiers(f.colTiers).length === 0 ? [{
+          upTo: "800",
+          price: String((f.mode === "multi" ? f.mColPrice : f.colPrice) || "3.5")
+        }, {
+          upTo: "",
+          price: ""
+        }] : f.colTiers
+      }),
+      style: {
+        ...btnS(f.tierEnabled ? "accent" : "light"),
+        padding: "7px 16px",
+        fontSize: 12,
+        whiteSpace: "nowrap"
+      }
+    }, f.tierEnabled ? "啟用中 ✓" : "關閉")), f.tierEnabled && /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: C.orangeBg,
+        border: "1px solid " + C.orangeBorder,
+        borderRadius: 4,
+        padding: 14
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: C.muted,
+        marginBottom: 12,
+        fontWeight: "bold",
+        lineHeight: 1.6
+      }
+    }, "填「累計到第幾張」和「該段單價」，最後一段的張數留空＝以上不限。適用單台、以及多台的「總額度合併計算」。"), f.mode === "multi" && f.multiCalcMode === "separate" && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: C.danger,
+        marginBottom: 12,
+        fontWeight: "bold"
+      }
+    }, "⚠️ 目前是「各機台獨立計算」，階梯不會套用，仍依各機台自己的單價計費"), /*#__PURE__*/React.createElement(TierEditor, {
+      title: "⚫ 黑白超印級距",
+      color: C.navy,
+      tiers: f.bwTiers,
+      onChange: v => upd({
+        bwTiers: v
+      })
+    }), (f.mode === "multi" || f.machineType !== "bw") && /*#__PURE__*/React.createElement(TierEditor, {
+      title: "🔴 彩色超印級距",
+      color: C.danger,
+      tiers: f.colTiers,
+      onChange: v => upd({
+        colTiers: v
+      })
+    }))), f.mode === "single" && /*#__PURE__*/React.createElement("div", {
       style: {
         background: "#FFF",
         borderRadius: 6,
@@ -1885,7 +2251,9 @@ function App() {
       ddk,
       nk
     }) => {
-      const result = calcFee(f[ck], f[pk], f[qk], f[prk], f[ddk], f.billingCycle);
+      const blockTiers = f.tierEnabled ? ck === "bwCur" ? f.bwTiers : f.colTiers : null;
+      const blockTierOn = tiersActive(f.tierEnabled, blockTiers);
+      const result = calcFee(f[ck], f[pk], f[qk], f[prk], f[ddk], f.billingCycle, blockTiers);
       const isSwapped = f.machineSwapped;
       const newInitKey = ck === "bwCur" ? "bwNewInit" : "colNewInit";
       const newCurKey = ck === "bwCur" ? "bwNewCur" : "colNewCur";
@@ -1896,7 +2264,8 @@ function App() {
       const swapActual = Math.max(0, swapRaw - (Number(f[ddk]) || 0));
       const swapQuota = (Number(f[qk]) || 0) * Number(f.billingCycle);
       const swapOver = Math.max(0, swapActual - swapQuota);
-      const swapFee = Math.round(swapOver * (Number(f[prk]) || 0));
+      const swapTF = tierFee(swapOver, f[prk], blockTiers);
+      const swapFee = swapTF.fee;
       return /*#__PURE__*/React.createElement("div", {
         key: title,
         style: {
@@ -2119,7 +2488,14 @@ function App() {
         onChange: e => upd({
           [prk]: e.target.value
         })
-      })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+      }), blockTierOn && /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontSize: 10,
+          color: C.orange,
+          marginTop: 3,
+          fontWeight: "bold"
+        }
+      }, "⚡ 階梯計價中，此欄不使用")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
         style: lbl
       }, "🔧 扣除張數"), /*#__PURE__*/React.createElement("input", {
         style: inp(),
@@ -2148,7 +2524,7 @@ function App() {
           fontWeight: "bold",
           color: result.over > 0 ? C.danger : C.success
         }
-      }, "總印量 ", result.raw.toLocaleString(), (Number(f[ddk]) || 0) > 0 ? " → 扣除後計費 " + result.actual.toLocaleString() : "", " ｜ ", result.over > 0 ? "超出 " + result.over.toLocaleString() + " 張 → $" + Math.round(result.fee).toLocaleString() : "✓ 未超出額度 (本期總額度: " + (Number(f[qk]) || 0) * Number(f.billingCycle) + ")"));
+      }, "總印量 ", result.raw.toLocaleString(), (Number(f[ddk]) || 0) > 0 ? " → 扣除後計費 " + result.actual.toLocaleString() : "", " ｜ ", result.over > 0 ? "超出 " + result.over.toLocaleString() + " 張 → $" + Math.round(result.fee).toLocaleString() : "✓ 未超出額度 (本期總額度: " + (Number(f[qk]) || 0) * Number(f.billingCycle) + ")"), !isSwapped && f[ck] && tierLine(result.tierRows), isSwapped && f[ck] && tierLine(swapTF.rows));
     })), f.mode === "multi" && /*#__PURE__*/React.createElement("div", {
       style: {
         background: "#FFF",
@@ -2802,18 +3178,24 @@ function App() {
         sumColFee = 0;
       const cycle = Number(f.billingCycle) || 1;
       const rentCycle = Number(f.rentCycle) || cycle;
+      // 階梯計價：單台 與 多台合併計算 才適用
+      const liveTierUse = !!f.tierEnabled && (f.mode === "single" || f.multiCalcMode === "pooled");
+      const liveBwT = liveTierUse ? f.bwTiers : null;
+      const liveColT = liveTierUse ? f.colTiers : null;
+      let liveBwRows = [],
+        liveColRows = [];
       const convOn = !!f.bw2colConvert && (f.mode !== "single" || f.machineType !== "bw");
       const convRatio = Number(f.bw2colRatio) || 10;
       let convBonus = 0,
         convLeftover = 0;
       if (f.mode === "single") {
-        const sBw = calcFee(f.bwCur, f.bwPrev, f.bwQuota, f.bwPrice, f.bwDeduct, cycle);
+        const sBw = calcFee(f.bwCur, f.bwPrev, f.bwQuota, f.bwPrice, f.bwDeduct, cycle, liveBwT);
         const sCol = f.machineType === "bw" ? {
           raw: 0,
           actual: 0,
           over: 0,
           fee: 0
-        } : calcFee(f.colCur, f.colPrev, f.colQuota, f.colPrice, f.colDeduct, cycle);
+        } : calcFee(f.colCur, f.colPrev, f.colQuota, f.colPrice, f.colDeduct, cycle, liveColT);
         sumRent = (Number(f.baseRent) || 0) * rentCycle;
         sumBwRaw = sBw.raw;
         sumBwQuota = (Number(f.bwQuota) || 0) * cycle;
@@ -2827,7 +3209,10 @@ function App() {
         convBonus = Math.floor(convLeftover / convRatio);
         sumColQuota = colQuotaBase + convBonus;
         sumColOver = f.machineType === "bw" ? 0 : Math.max(0, sCol.actual - sumColQuota);
-        sumColFee = Math.round(sumColOver * (Number(f.colPrice) || 0));
+        const sColTF = tierFee(sumColOver, f.colPrice, liveColT);
+        sumColFee = sColTF.fee;
+        liveBwRows = sBw.tierRows || [];
+        liveColRows = sColTF.rows;
       } else {
         const convMethod = f.bw2colMultiMode || "perMachine";
         let tBwLeftover = 0,
@@ -2877,10 +3262,14 @@ function App() {
         if (f.multiCalcMode === "pooled") {
           const bAct = Math.max(0, sumBwRaw - sumBwDeduct);
           sumBwOver = Math.max(0, bAct - sumBwQuota);
-          sumBwFee = Math.round(sumBwOver * (Number(f.mBwPrice) || 0));
+          const pBwTF = tierFee(sumBwOver, f.mBwPrice, liveBwT);
+          sumBwFee = pBwTF.fee;
+          liveBwRows = pBwTF.rows;
           const poolColActual = Math.max(0, sumColRaw - sumColDeduct);
           sumColOver = Math.max(0, poolColActual - (sumColQuota + convPoolBonus));
-          sumColFee = Math.round(sumColOver * (Number(f.mColPrice) || 0));
+          const pColTF = tierFee(sumColOver, f.mColPrice, liveColT);
+          sumColFee = pColTF.fee;
+          liveColRows = pColTF.rows;
         }
       }
       const totalOverageFee = sumBwFee + sumColFee;
@@ -2944,7 +3333,7 @@ function App() {
           marginLeft: 4,
           fontWeight: "normal"
         }
-      }, "(總印 ", sumBwRaw.toLocaleString(), " - 扣/額 = 超出 ", sumBwOver.toLocaleString(), " 張)")), /*#__PURE__*/React.createElement("span", null, "$", Math.round(sumBwFee).toLocaleString())), (f.mode === "single" ? f.machineType !== "bw" : true) && /*#__PURE__*/React.createElement("div", {
+      }, "(總印 ", sumBwRaw.toLocaleString(), " - 扣/額 = 超出 ", sumBwOver.toLocaleString(), " 張)")), /*#__PURE__*/React.createElement("span", null, "$", Math.round(sumBwFee).toLocaleString())), tierLine(liveBwRows), (f.mode === "single" ? f.machineType !== "bw" : true) && /*#__PURE__*/React.createElement("div", {
         style: {
           display: "flex",
           justifyContent: "space-between",
@@ -2960,7 +3349,7 @@ function App() {
           marginLeft: 4,
           fontWeight: "normal"
         }
-      }, "(總印 ", sumColRaw.toLocaleString(), " - 扣/額 = 超出 ", sumColOver.toLocaleString(), " 張)")), /*#__PURE__*/React.createElement("span", null, "$", Math.round(sumColFee).toLocaleString())), (f.taxMode === "外加" || f.overageTaxMode === "外加") && /*#__PURE__*/React.createElement("div", {
+      }, "(總印 ", sumColRaw.toLocaleString(), " - 扣/額 = 超出 ", sumColOver.toLocaleString(), " 張)")), /*#__PURE__*/React.createElement("span", null, "$", Math.round(sumColFee).toLocaleString())), tierLine(liveColRows), (f.taxMode === "外加" || f.overageTaxMode === "外加") && /*#__PURE__*/React.createElement("div", {
         style: {
           display: "flex",
           justifyContent: "space-between",
@@ -3052,6 +3441,10 @@ function App() {
         bw2colRatio: ec.bw2colRatio || "10",
         bw2colMultiMode: ec.bw2colMultiMode || "perMachine",
         multiCalcMode: ec.multiCalcMode || "pooled",
+        machineType: ec.machineType || "color",
+        tierEnabled: !!ec.tierEnabled,
+        bwTiers: saveTiers(ec.bwTiers),
+        colTiers: saveTiers(ec.colTiers),
         memo: ec.memo || "",
         billingDeadlineDay: ec.billingDeadlineDay || ""
       }];
@@ -3784,6 +4177,95 @@ function App() {
       }
     }, "＋ 新增機台"))), /*#__PURE__*/React.createElement("div", {
       style: {
+        background: "#FFF",
+        borderRadius: 6,
+        padding: 16,
+        marginBottom: 16,
+        borderLeft: "4px solid " + C.orange
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        marginBottom: ec.tierEnabled ? 14 : 0,
+        gap: 12
+      }
+    }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        letterSpacing: 2,
+        color: C.orange,
+        fontWeight: "bold"
+      }
+    }, "⚡ 超印階梯計價"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: C.muted,
+        marginTop: 4
+      }
+    }, "超印愈多、單價愈低。例：前 800 張 $3，之後 $2.5 → 超印 900 張收 $2,650")), /*#__PURE__*/React.createElement("button", {
+      onClick: () => updEc({
+        tierEnabled: !ec.tierEnabled,
+        bwTiers: !ec.tierEnabled && asTiers(ec.bwTiers).length === 0 ? [{
+          upTo: "800",
+          price: String((ec.mode === "multi" ? ec.mBwPrice : ec.bwPrice) || "0.35")
+        }, {
+          upTo: "",
+          price: ""
+        }] : ec.bwTiers,
+        colTiers: !ec.tierEnabled && asTiers(ec.colTiers).length === 0 ? [{
+          upTo: "800",
+          price: String((ec.mode === "multi" ? ec.mColPrice : ec.colPrice) || "3.5")
+        }, {
+          upTo: "",
+          price: ""
+        }] : ec.colTiers
+      }),
+      style: {
+        ...btnS(ec.tierEnabled ? "accent" : "light"),
+        padding: "7px 16px",
+        fontSize: 12,
+        whiteSpace: "nowrap"
+      }
+    }, ec.tierEnabled ? "啟用中 ✓" : "關閉")), ec.tierEnabled && /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: C.orangeBg,
+        border: "1px solid " + C.orangeBorder,
+        borderRadius: 4,
+        padding: 14
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: C.muted,
+        marginBottom: 12,
+        fontWeight: "bold",
+        lineHeight: 1.6
+      }
+    }, "填「累計到第幾張」和「該段單價」，最後一段的張數留空＝以上不限。適用單台、以及多台的「總額度合併計算」。"), ec.mode === "multi" && (ec.multiCalcMode || "pooled") === "separate" && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: C.danger,
+        marginBottom: 12,
+        fontWeight: "bold"
+      }
+    }, "⚠️ 目前是「各機台獨立計算」，階梯不會套用，仍依各機台自己的單價計費"), /*#__PURE__*/React.createElement(TierEditor, {
+      title: "⚫ 黑白超印級距",
+      color: C.navy,
+      tiers: ec.bwTiers,
+      onChange: v => updEc({
+        bwTiers: v
+      })
+    }), (ec.mode === "multi" || (ec.machineType || "color") !== "bw") && /*#__PURE__*/React.createElement(TierEditor, {
+      title: "🔴 彩色超印級距",
+      color: C.danger,
+      tiers: ec.colTiers,
+      onChange: v => updEc({
+        colTiers: v
+      })
+    }))), /*#__PURE__*/React.createElement("div", {
+      style: {
         display: "flex",
         gap: 12
       }
@@ -3857,6 +4339,9 @@ function App() {
         billingCycle: "1",
         machineType: "color",
         multiCalcMode: "pooled",
+        tierEnabled: false,
+        bwTiers: [],
+        colTiers: [],
         machines: [emptyMachine()]
       })
     }, "＋ 新增")), /*#__PURE__*/React.createElement("div", {
@@ -3908,7 +4393,7 @@ function App() {
         color: C.muted,
         marginTop: 3
       }
-    }, c.mode === "single" ? "單台" : "多台", " ｜ 租金:", c.taxMode || "未稅", " / 超印:", c.overageTaxMode || c.taxMode || "未稅", " ｜ ", c.machineType === "bw" ? "黑白機" : "彩色機"), (c.memo || c.rentNote) && /*#__PURE__*/React.createElement("div", {
+    }, c.mode === "single" ? "單台" : "多台", " ｜ 租金:", c.taxMode || "未稅", " / 超印:", c.overageTaxMode || c.taxMode || "未稅", " ｜ ", c.machineType === "bw" ? "黑白機" : "彩色機", tiersActive(c.tierEnabled, c.bwTiers) || tiersActive(c.tierEnabled, c.colTiers) ? " ｜ ⚡階梯計價" : ""), (c.memo || c.rentNote) && /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 11,
         color: C.orange,
@@ -4484,7 +4969,7 @@ function App() {
       color: C.muted,
       marginTop: 4
     }
-  }, "民國 ", r.billingYear, " 年 ", r.billingMonth, " 月 ｜ ", r.billingCycle || 1, "個月結 ｜ 租:", r.taxMode || "未稅", " / 超:", r.overageTaxMode || r.taxMode || "未稅")), /*#__PURE__*/React.createElement("div", {
+  }, "民國 ", r.billingYear, " 年 ", r.billingMonth, " 月 ｜ ", r.billingCycle || 1, "個月結 ｜ 租:", r.taxMode || "未稅", " / 超:", r.overageTaxMode || r.taxMode || "未稅", r.tierEnabled ? " ｜ 超印階梯計價" : "")), /*#__PURE__*/React.createElement("div", {
     style: {
       textAlign: "right"
     }
@@ -4871,7 +5356,7 @@ function App() {
               borderBottom: "2px solid #BBB",
               background: "#F8F8F8"
             }
-          }, "$", d.price), showMachineFee && /*#__PURE__*/React.createElement("td", {
+          }, priceCell(d)), showMachineFee && /*#__PURE__*/React.createElement("td", {
             style: {
               padding: "8px 7px",
               textAlign: "right",
@@ -4955,7 +5440,7 @@ function App() {
             color: "#000",
             borderBottom: "1px dashed #CCC"
           }
-        }, "$", d.price), showMachineFee && /*#__PURE__*/React.createElement("td", {
+        }, priceCell(d)), showMachineFee && /*#__PURE__*/React.createElement("td", {
           style: {
             padding: "10px 7px",
             textAlign: "right",
@@ -4964,7 +5449,7 @@ function App() {
             borderBottom: "1px dashed #CCC"
           }
         }, (d.fee || 0) > 0 ? "$" + Math.round(Number(d.fee)).toLocaleString() : "未超印"));
-      }))), Number(d_col.bwConvertBonus) > 0 && /*#__PURE__*/React.createElement("div", {
+      }))), tierNote("黑白", d_bw.tierRows), mType !== "bw" && tierNote("彩色", d_col.tierRows), Number(d_col.bwConvertBonus) > 0 && /*#__PURE__*/React.createElement("div", {
         style: {
           border: "1px solid #000",
           borderRadius: 4,
@@ -5169,8 +5654,14 @@ function App() {
     }, "$", Math.round(Number(r.baseRent)).toLocaleString()))))), isSingle ? renderMachineTable({
       type: r.machineType,
       model: r.model,
-      bw: r.bw,
-      col: r.col,
+      bw: {
+        ...(r.bw || {}),
+        tierRows: (r.bw && r.bw.tierRows) || r.bwTierRows || []
+      },
+      col: {
+        ...(r.col || {}),
+        tierRows: (r.col && r.col.tierRows) || r.colTierRows || []
+      },
       baseRent: 0
     }, 0, true) : (r.machines || []).map((m, idx) => renderMachineTable(m, idx, false)), !isSingle && r.multiCalcMode === "pooled" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
       style: {
@@ -5208,7 +5699,8 @@ function App() {
       quota: r.bwQuota,
       over: r.bwOver,
       price: r.bwPrice,
-      fee: r.bwFee
+      fee: r.bwFee,
+      tierRows: r.bwTierRows || []
     }, {
       lb: "彩色列印",
       raw: r.totalColRaw,
@@ -5217,7 +5709,8 @@ function App() {
       quota: r.colQuota,
       over: r.colOver,
       price: r.colPrice,
-      fee: r.colFee
+      fee: r.colFee,
+      tierRows: r.colTierRows || []
     }].map(({
       lb,
       raw,
@@ -5226,7 +5719,8 @@ function App() {
       quota,
       over,
       price,
-      fee
+      fee,
+      tierRows
     }, i) => /*#__PURE__*/React.createElement("tr", {
       key: lb
     }, /*#__PURE__*/React.createElement("td", {
@@ -5284,7 +5778,10 @@ function App() {
         color: "#000",
         borderBottom: "1px dashed #CCC"
       }
-    }, "$", price), /*#__PURE__*/React.createElement("td", {
+    }, priceCell({
+      price,
+      tierRows
+    })), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: "10px",
         textAlign: "right",
@@ -5292,7 +5789,7 @@ function App() {
         color: "#000",
         borderBottom: "1px dashed #CCC"
       }
-    }, (fee || 0) > 0 ? "$" + Math.round(Number(fee)).toLocaleString() : "未超印"))))), Number(r.multiColConvBonus) > 0 && /*#__PURE__*/React.createElement("div", {
+    }, (fee || 0) > 0 ? "$" + Math.round(Number(fee)).toLocaleString() : "未超印"))))), tierNote("黑白", r.bwTierRows), tierNote("彩色", r.colTierRows), Number(r.multiColConvBonus) > 0 && /*#__PURE__*/React.createElement("div", {
       style: {
         border: "1px solid #000",
         borderRadius: 4,
