@@ -20,8 +20,12 @@ const {
 // ⚙️ Apps Script 網址
 const API_URL = "https://script.google.com/macros/s/AKfycbxqBvxJAmyw3oef6XKi8MFNVe7Xl9qXW1Epk_RgpHxbEdqiO0MGE1IJrDK3R0DRcJXw/exec";
 const MONTHS = ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"];
-const now = new Date();
-const CY = now.getFullYear() - 1911;
+// ⚠️ 「今天」每次都重新取，不要在網頁打開時就固定下來。
+// 以前寫成 const now = new Date()，網頁一直開著（手機/平板分頁沒關）跨月後，
+// 結算月份還會停在上個月，技術員就容易開成上個月的單。
+const today = () => new Date();
+const rocYear = () => today().getFullYear() - 1911;
+const curMonth = () => today().getMonth() + 1;
 const C = {
   bg: "#F5F3EE",
   navy: "#1A2744",
@@ -404,8 +408,8 @@ function emptyForm() {
     clientName: "",
     taxMode: "未稅",
     overageTaxMode: "未稅",
-    billingYear: String(CY),
-    billingMonth: String(now.getMonth() + 1),
+    billingYear: String(rocYear()),
+    billingMonth: String(curMonth()),
     billingCycle: "1",
     rentCycle: "",
     bw2colConvert: false,
@@ -513,8 +517,8 @@ function App() {
   const [fYear, setFYear] = useState("");
   const [fMonth, setFMonth] = useState("");
   const [fClient, setFClient] = useState("");
-  const [pYear, setPYear] = useState(String(CY));
-  const [pMonth, setPMonth] = useState(String(now.getMonth() + 1));
+  const [pYear, setPYear] = useState(String(rocYear()));
+  const [pMonth, setPMonth] = useState(String(curMonth()));
   const [pOverdueOnly, setPOverdueOnly] = useState(false);
   const [pDueByDay, setPDueByDay] = useState("");
   const [editClient, setEditClient] = useState(null);
@@ -605,8 +609,8 @@ function App() {
       setLoading(true);
     }
     const wantAll = loadAll || loadedAll;
-    const curY = String(CY),
-      curM = String(now.getMonth() + 1);
+    const curY = String(rocYear()),
+      curM = String(curMonth());
     try {
       // 開啟時只打一趟 getAll（客戶+記錄一起回來，記錄用精簡模式，且只要本期）。
       // 萬一 Apps Script 還是舊版沒有 getAll，就自動退回原本的兩趟做法，
@@ -665,6 +669,27 @@ function App() {
   useEffect(() => {
     load();
   }, [apiReady]); // eslint-disable-line
+
+  // 網頁一直開著跨月了（例如 10 月打開、11 月才再用）：切回這個分頁時，
+  // 自動把「尚未開單」切到新的月份並重新載入本期資料。
+  const [openedPeriod, setOpenedPeriod] = useState(periodKey(rocYear(), curMonth()));
+  useEffect(() => {
+    const onBack = () => {
+      if (document.visibilityState === "hidden") return;
+      const k = periodKey(rocYear(), curMonth());
+      if (k === openedPeriod) return;
+      setOpenedPeriod(k);
+      setPYear(String(rocYear()));
+      setPMonth(String(curMonth()));
+      load(false);
+    };
+    document.addEventListener("visibilitychange", onBack);
+    window.addEventListener("focus", onBack);
+    return () => {
+      document.removeEventListener("visibilitychange", onBack);
+      window.removeEventListener("focus", onBack);
+    };
+  }, [openedPeriod, load]);
 
   // 把新抓到的記錄併進來（用 id 去重，避免重複）
   const mergeRecords = useCallback(incoming => {
@@ -1359,9 +1384,9 @@ function App() {
   // 那一期到底載好了沒？沒載好就不能相信「尚未開單」的結果
   const pendingPeriodReady = loadedAll || loadedPeriods.indexOf(periodKey(pYear, pMonth)) !== -1;
   const billedNamesThisPeriod = new Set(records.filter(r => String(r.billingYear) === String(pYear) && String(r.billingMonth) === String(pMonth)).map(r => r.clientName));
-  const todayDay = now.getDate();
-  const curCY = CY,
-    curMonthNum = now.getMonth() + 1;
+  const todayDay = today().getDate();
+  const curCY = rocYear(),
+    curMonthNum = curMonth();
   const periodNum = Number(pYear) * 100 + Number(pMonth);
   const curPeriodNum = curCY * 100 + curMonthNum;
   const periodIsPast = periodNum < curPeriodNum;
@@ -1802,7 +1827,33 @@ function App() {
     }, MONTHS.map((m, i) => /*#__PURE__*/React.createElement("option", {
       key: i,
       value: String(i + 1)
-    }, m))))), /*#__PURE__*/React.createElement("div", {
+    }, m))))), !editRecordId && (String(f.billingYear) !== String(rocYear()) || String(f.billingMonth) !== String(curMonth())) && /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 12,
+        padding: "8px 12px",
+        background: "#FFF0F0",
+        border: "2px solid " + C.danger,
+        borderRadius: 4,
+        fontSize: 12,
+        color: C.danger,
+        fontWeight: "bold",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 8,
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement("span", null, "⚠️ 注意：目前選的是 ", f.billingYear, " 年 ", f.billingMonth, " 月，不是本月（", rocYear(), " 年 ", curMonth(), " 月）"), /*#__PURE__*/React.createElement("button", {
+      onClick: () => upd({
+        billingYear: String(rocYear()),
+        billingMonth: String(curMonth())
+      }),
+      style: {
+        ...btnS("red"),
+        padding: "4px 12px",
+        fontSize: 11
+      }
+    }, "改成本月")), /*#__PURE__*/React.createElement("div", {
       style: {
         marginBottom: 12
       }
@@ -1829,7 +1880,7 @@ function App() {
     })), (() => {
       const cycle = Number(f.billingCycle) || 1;
       const endM = Number(f.billingMonth);
-      const endY = Number(f.billingYear) || CY;
+      const endY = Number(f.billingYear) || rocYear();
       if (cycle <= 1) return null;
       const months = [];
       for (let i = cycle - 1; i >= 0; i--) {
@@ -4524,7 +4575,7 @@ function App() {
     style: inp(),
     value: pYear,
     onChange: e => setPYear(e.target.value),
-    placeholder: String(CY)
+    placeholder: String(rocYear())
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       flex: 1,
@@ -4545,8 +4596,8 @@ function App() {
       whiteSpace: "nowrap"
     },
     onClick: () => {
-      setPYear(String(CY));
-      setPMonth(String(now.getMonth() + 1));
+      setPYear(String(rocYear()));
+      setPMonth(String(curMonth()));
     }
   }, "回到本月")), /*#__PURE__*/React.createElement("div", {
     style: {
