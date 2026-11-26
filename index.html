@@ -1076,6 +1076,31 @@ function App() {
       totalRent = (Number(f.baseRent) || 0) * rentCycle;
       totalOverage = bw.fee + col.fee;
     } else {
+      // 多台「總額度合併計算」：黑白剩餘要用「全部額度 − 全部印量」的淨剩餘。
+      // 以前是各台剩餘只加正數，A 台超印的部分沒有先抵掉 B 台的剩餘，
+      // 結果 A 台的超印被 B 台額度吃掉（黑白不收錢），B 台剩餘又被拿去換彩色，等於重複折抵。
+      if (f.multiCalcMode === "pooled") {
+        const netBwLeftover = Math.max(0, tBwQuota - Math.max(0, tBwRaw - tBwDeduct));
+        if (tBwLeftover > netBwLeftover) {
+          const netCap = Math.floor(netBwLeftover / convRatio);
+          if (tColBonus > netCap) tColBonus = netCap;
+          tBwLeftover = netBwLeftover;
+          // 帳單上各機台表格顯示的「換算彩色」也要跟著改成實際可用的量
+          let remainCap = tColBonus;
+          ms.forEach(m => {
+            const had = Number(m.col.bwConvertBonus) || 0;
+            if (had <= 0) return;
+            const use = Math.min(had, remainCap);
+            remainCap -= use;
+            m.col.bwConvertBonus = use;
+            m.col.bwLeftoverUsed = use * convRatio;
+            m.col.convRatio = use > 0 ? convRatio : 0;
+            m.col.quota = (Number(m.col.quotaBase) || 0) + use;
+            m.col.over = Math.max(0, (Number(m.col.actual) || 0) - m.col.quota);
+            m.col.fee = Math.round(m.col.over * (Number(m.col.price) || 0));
+          });
+        }
+      }
       // 多台：黑白剩餘換算彩色的加成總量
       const convPoolBonus = f.bw2colConvert ? convMethod === "pooled" ? Math.floor(tBwLeftover / convRatio) : tColBonus : 0;
 
@@ -3292,6 +3317,15 @@ function App() {
             mColOver: Math.max(0, mColActual - (mColQuotaBase + mColBonus))
           };
         });
+        // 總額度合併計算：用淨剩餘（全部額度 − 全部印量），避免某台超印、另一台剩餘被重複折抵
+        if (f.multiCalcMode === "pooled") {
+          const netBwLeftover = Math.max(0, sumBwQuota - Math.max(0, sumBwRaw - sumBwDeduct));
+          if (tBwLeftover > netBwLeftover) {
+            const netCap = Math.floor(netBwLeftover / convRatio);
+            if (tColBonus > netCap) tColBonus = netCap;
+            tBwLeftover = netBwLeftover;
+          }
+        }
         const convPoolBonus = convOn ? convMethod === "pooled" ? Math.floor(tBwLeftover / convRatio) : tColBonus : 0;
         convLeftover = tBwLeftover;
         convBonus = convPoolBonus;
